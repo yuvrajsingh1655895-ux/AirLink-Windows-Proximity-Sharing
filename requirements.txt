@@ -1,0 +1,4 @@
+tkinterdnd2>=0.4.2
+pynput>=1.7.7
+pystray>=0.19.5
+Pillow>=10.0.0
