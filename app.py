@@ -22,6 +22,9 @@ except ImportError as exc:  # Explain setup clearly instead of failing with a cr
     ) from exc
 
 from proximity_policy import ProximityPolicy
+from wallpaper_theme import (
+    current_wallpaper_path, palette_for_wallpaper, recolor_widget_tree, register_palette,
+)
 
 BG = "#0b1020"
 PANEL = "#121a2e"
@@ -33,6 +36,34 @@ BLUE = "#6aa8ff"
 CYAN = "#61e6dc"
 GREEN = "#69e0a3"
 ORANGE = "#ffca78"
+PANEL3 = "#13223a"
+BORDER_ACCENT = "#2a4770"
+BUTTON_TEXT = "#07101f"
+CURRENT_PALETTE = {
+    "BG": BG, "PANEL": PANEL, "PANEL2": PANEL2, "PANEL3": PANEL3, "BORDER": BORDER,
+    "BORDER_ACCENT": BORDER_ACCENT, "TEXT": TEXT, "MUTED": MUTED, "BLUE": BLUE,
+    "CYAN": CYAN, "GREEN": GREEN, "ORANGE": ORANGE, "BUTTON_TEXT": BUTTON_TEXT,
+}
+
+def set_palette_globals(palette):
+    """Update the legacy constants used by the UI builders to the live palette."""
+    global BG, PANEL, PANEL2, PANEL3, BORDER, BORDER_ACCENT, TEXT, MUTED
+    global BLUE, CYAN, GREEN, ORANGE, BUTTON_TEXT, CURRENT_PALETTE
+    BG = palette["BG"]
+    PANEL = palette["PANEL"]
+    PANEL2 = palette["PANEL2"]
+    PANEL3 = palette["PANEL3"]
+    BORDER = palette["BORDER"]
+    BORDER_ACCENT = palette["BORDER_ACCENT"]
+    TEXT = palette["TEXT"]
+    MUTED = palette["MUTED"]
+    BLUE = palette["BLUE"]
+    CYAN = palette["CYAN"]
+    GREEN = palette["GREEN"]
+    ORANGE = palette["ORANGE"]
+    BUTTON_TEXT = palette["BUTTON_TEXT"]
+    CURRENT_PALETTE = dict(palette)
+    register_palette(CURRENT_PALETTE)
 
 
 class AirLink:
@@ -74,7 +105,7 @@ class AirLink:
             text=t,
             command=cmd,
             bg=BLUE if primary else PANEL2,
-            fg="#07101f" if primary else TEXT,
+            fg=BUTTON_TEXT if primary else TEXT,
             activebackground=CYAN,
             relief="flat",
             bd=0,
@@ -149,10 +180,10 @@ class AirLink:
         head.pack(fill="x", pady=(0, 16))
         self.label(head, "Nearby Windows laptops", 24, TEXT, True).pack(anchor="w")
         self.label(head, "Select a sample device to preview the 5 m policy gate.", 10, MUTED).pack(anchor="w", pady=(5, 0))
-        hero = tk.Frame(self.content, bg="#13223a", highlightbackground="#2a4770", highlightthickness=1)
+        hero = tk.Frame(self.content, bg=PANEL3, highlightbackground=BORDER_ACCENT, highlightthickness=1)
         hero.pack(fill="x", pady=(0, 16))
-        self.label(hero, "PROXIMITY GATE · THREE STABLE SAMPLES · FAIL CLOSED", 10, CYAN, True, bg="#13223a").pack(anchor="w", padx=18, pady=(16, 6))
-        self.label(hero, "Pairing + connection + fresh signal are required.", 13, TEXT, True, bg="#13223a").pack(anchor="w", padx=18, pady=(0, 16))
+        self.label(hero, "PROXIMITY GATE · THREE STABLE SAMPLES · FAIL CLOSED", 10, CYAN, True, bg=PANEL3).pack(anchor="w", padx=18, pady=(16, 6))
+        self.label(hero, "Pairing + connection + fresh signal are required.", 13, TEXT, True, bg=PANEL3).pack(anchor="w", padx=18, pady=(0, 16))
         self.btn(hero, "＋ Choose file", self.choose, True).pack(anchor="e", padx=16, pady=(0, 14))
 
         grid = tk.Frame(self.content, bg=BG)
@@ -255,7 +286,7 @@ class AirLink:
 
 
 class DragOverlay:
-    """A right-edge drop panel revealed by a global left-button drag gesture."""
+    """A compact, sketch-inspired right-edge device dock revealed during drag."""
 
     def __init__(self, root, dashboard: AirLink, event_queue: queue.Queue):
         self.root = root
@@ -270,10 +301,11 @@ class DragOverlay:
         if self.window is None or not self.window.winfo_exists():
             self._build()
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        height = min(510, max(430, sh - 80))
-        width = 286
-        x = max(0, sw - width - 16)
-        y = max(0, (sh - height) // 2)
+        height = min(560, max(420, sh - 72))
+        width = 224
+        # Keep the receiver dock against the desktop's right edge, like the user's sketch.
+        x = max(0, sw - width - 14)
+        y = max(18, (sh - height) // 2)
         self.window.geometry(f"{width}x{height}+{x}+{y}")
         self.window.deiconify()
         self.window.lift()
@@ -299,47 +331,98 @@ class DragOverlay:
         w.dnd_bind("<<DropLeave>>", self._drop_leave)
         w.dnd_bind("<<Drop>>", self._drop)
 
-        head = tk.Frame(w, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
-        head.pack(fill="x", padx=8, pady=(8, 6))
-        line = tk.Frame(head, bg=PANEL)
-        line.pack(fill="x", padx=12, pady=(10, 2))
-        tk.Label(line, text="◉ AirLink", bg=PANEL, fg=CYAN, font=("Segoe UI", 16, "bold")).pack(side="left")
-        tk.Button(line, text="×", command=self.hide, bg=PANEL2, fg=TEXT, relief="flat", bd=0, padx=8, cursor="hand2").pack(side="right")
-        tk.Label(head, text="DROP A FILE ON A DEVICE", bg=PANEL, fg=TEXT, font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=12, pady=(2, 3))
-        tk.Label(head, text="Drag-and-drop preview · sample devices", bg=PANEL, fg=MUTED, font=("Segoe UI", 8)).pack(anchor="w", padx=12, pady=(0, 10))
+        # Outer dock. The regular dashboard is intentionally left untouched.
+        shell = tk.Frame(w, bg=BG, highlightbackground=BORDER, highlightthickness=1)
+        shell.pack(fill="both", expand=True, padx=3, pady=3)
 
-        devices_box = tk.Frame(w, bg=BG)
-        devices_box.pack(fill="both", expand=True, padx=8)
-        for name, _kind, rssi in self.dashboard.devices:
+        head = tk.Frame(shell, bg=PANEL)
+        head.pack(fill="x", padx=1, pady=(1, 8))
+        title_row = tk.Frame(head, bg=PANEL)
+        title_row.pack(fill="x", padx=11, pady=(11, 5))
+        tk.Label(title_row, text="◉", bg=PANEL, fg=CYAN, font=("Segoe UI", 19, "bold")).pack(side="left", padx=(0, 7))
+        tk.Label(title_row, text="AirLink", bg=PANEL, fg=TEXT, font=("Segoe UI", 15, "bold")).pack(side="left")
+        tk.Button(title_row, text="×", command=self.hide, bg=PANEL2, fg=MUTED,
+                  activebackground=BORDER, activeforeground=TEXT, relief="flat", bd=0,
+                  padx=6, cursor="hand2").pack(side="right")
+        tk.Label(head, text="DROP FILE ON A DEVICE", bg=PANEL, fg=CYAN,
+                 font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=12, pady=(0, 3))
+        tk.Label(head, text="Nearby Windows laptops", bg=PANEL, fg=MUTED,
+                 font=("Segoe UI", 8)).pack(anchor="w", padx=12, pady=(0, 10))
+
+        people = tk.Frame(shell, bg=BG)
+        people.pack(fill="both", expand=True, padx=7)
+        for index, (name, _kind, rssi) in enumerate(self.dashboard.devices):
             decision = self.dashboard.policy.evaluate(rssi, True, True, [rssi - 1, rssi, rssi + 1])
-            card = tk.Frame(devices_box, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+            allowed = decision.allowed
+            card_bg = PANEL
+            card = tk.Frame(people, bg=card_bg, highlightbackground=BORDER, highlightthickness=1,
+                            cursor="hand2")
             card.pack(fill="x", pady=4)
             self.device_widgets[name] = card
-            row = tk.Frame(card, bg=PANEL)
-            row.pack(fill="x", padx=10, pady=(9, 2))
-            tk.Label(row, text="▢", bg=PANEL, fg=CYAN if decision.allowed else ORANGE, font=("Segoe UI", 19, "bold")).pack(side="left", padx=(0, 8))
-            labels = tk.Frame(row, bg=PANEL)
-            labels.pack(side="left", fill="x", expand=True)
-            tk.Label(labels, text=name, bg=PANEL, fg=TEXT, font=("Segoe UI", 10, "bold"), anchor="w").pack(fill="x")
-            tk.Label(labels, text=f"RSSI {rssi} dBm · DEMO", bg=PANEL, fg=MUTED, font=("Segoe UI", 8), anchor="w").pack(fill="x", pady=(2, 0))
-            tk.Label(card, text="DROP HERE" if decision.allowed else "BLOCKED BY DEMO THRESHOLD", bg=PANEL, fg=GREEN if decision.allowed else ORANGE, font=("Segoe UI", 8, "bold"), anchor="w").pack(fill="x", padx=12, pady=(0, 8))
 
-        footer = tk.Frame(w, bg="#13223a", highlightbackground="#2a4770", highlightthickness=1)
-        footer.pack(fill="x", padx=8, pady=8)
-        self.status_label = tk.Label(footer, text="Waiting for file drop…", bg="#13223a", fg=MUTED, font=("Segoe UI", 9), wraplength=245, justify="left", anchor="w")
-        self.status_label.pack(fill="x", padx=11, pady=10)
-        # Panel is a target; target handler decides the receiver from screen coordinates.
+            row = tk.Frame(card, bg=card_bg)
+            row.pack(fill="x", padx=9, pady=(9, 2))
+            avatar = tk.Canvas(row, width=34, height=34, bg=card_bg, highlightthickness=0,
+                               bd=0, cursor="hand2")
+            avatar.pack(side="left", padx=(0, 8))
+            avatar.create_oval(2, 2, 32, 32, fill=PANEL2, outline=CYAN if allowed else ORANGE, width=2)
+            initials = "".join(part[0] for part in name.replace("-", " ").split()[:2]).upper()[:2]
+            avatar.create_text(17, 17, text=initials or "PC", fill=TEXT,
+                               font=("Segoe UI", 9, "bold"))
+            labels = tk.Frame(row, bg=card_bg)
+            labels.pack(side="left", fill="x", expand=True)
+            tk.Label(labels, text=name, bg=card_bg, fg=TEXT,
+                     font=("Segoe UI", 9, "bold"), anchor="w", wraplength=125,
+                     justify="left").pack(fill="x")
+            tk.Label(labels, text="Windows laptop", bg=card_bg, fg=MUTED,
+                     font=("Segoe UI", 7), anchor="w").pack(fill="x", pady=(2, 0))
+            tk.Label(card, text="DROP HERE" if allowed else "OUT OF DEMO RANGE",
+                     bg=card_bg, fg=GREEN if allowed else ORANGE,
+                     font=("Segoe UI", 7, "bold"), anchor="w").pack(fill="x", padx=12, pady=(3, 9))
+
+            # Subtle hover highlight to make each receiver feel like a drop target.
+            def on_enter(_event, frame=card, ok=allowed):
+                frame.configure(highlightbackground=CYAN if ok else ORANGE, highlightthickness=2)
+            def on_leave(_event, frame=card, ok=allowed):
+                frame.configure(highlightbackground=BORDER, highlightthickness=1)
+            for widget in (card, row, avatar, labels, *row.winfo_children()):
+                widget.bind("<Enter>", on_enter)
+                widget.bind("<Leave>", on_leave)
+
+        footer = tk.Frame(shell, bg=PANEL3, highlightbackground=BORDER_ACCENT, highlightthickness=1)
+        footer.pack(fill="x", padx=7, pady=7)
+        self.status_label = tk.Label(
+            footer,
+            text="Release a file on a laptop card",
+            bg=PANEL3, fg=MUTED,
+            font=("Segoe UI", 8), wraplength=176,
+            justify="left", anchor="w",
+        )
+        self.status_label.pack(fill="x", padx=10, pady=10)
+        tk.Label(shell, text="ESC  ·  close panel", bg=BG, fg=MUTED,
+                 font=("Segoe UI", 7)).pack(anchor="center", pady=(0, 5))
 
     def hide(self):
         if self.window is not None and self.window.winfo_exists():
             self.window.withdraw()
+
+    def reset_for_theme_change(self):
+        """Discard the overlay so Canvas-drawn avatars are recreated in the new tint."""
+        try:
+            if self.window is not None and self.window.winfo_exists():
+                self.window.destroy()
+        except tk.TclError:
+            pass
+        self.window = None
+        self.status_label = None
+        self.device_widgets = {}
 
     def status(self, text, color=MUTED):
         if self.status_label is not None and self.status_label.winfo_exists():
             self.status_label.configure(text=text, fg=color)
 
     def _drop_enter(self, event):
-        self.status("Drop on a laptop card to select the receiver.", CYAN)
+        self.status("Drop the file directly on a laptop card.", CYAN)
         return event.action
 
     def _drop_position(self, event):
@@ -364,13 +447,13 @@ class DragOverlay:
                 chosen = name
                 break
         if not paths:
-            self.status("No file path received. Try dragging a file from File Explorer.", ORANGE)
+            self.status("No file path received. Try dragging from File Explorer.", ORANGE)
         elif chosen is None:
-            self.status("File drag detected. Drop directly on one of the laptop cards.", ORANGE)
+            self.status("File detected — drop it on a laptop card.", ORANGE)
         else:
             self.dashboard.accept_drop(paths[0], chosen, self.status)
             if len(paths) > 1:
-                self.status(f"{len(paths)} files dropped; preview stores the first file only.\nActual transfer is not implemented.", ORANGE)
+                self.status(f"{len(paths)} files dropped; preview uses the first file only.\nActual transfer is not implemented.", ORANGE)
         self.root.after(3500, self.hide)
         return getattr(event, "action", "copy")
 
@@ -391,12 +474,49 @@ class AirLinkHost:
         self._start_xy = None
         self._dragging = False
         self._mouse_lock = threading.Lock()
+        self.current_wallpaper = current_wallpaper_path()
+        self.current_theme_signature = tuple(sorted(CURRENT_PALETTE.items()))
         self._setup_tray()
         self._setup_mouse_listener()
         self.root.protocol("WM_DELETE_WINDOW", self.hide_dashboard)
         if background:
             self.root.withdraw()
         self.root.after(60, self._poll_events)
+        self.root.after(5000, self._refresh_wallpaper_theme)
+
+    def _refresh_wallpaper_theme(self):
+        """Poll Windows for wallpaper changes and tint the dashboard/panel accordingly."""
+        if not self.alive:
+            return
+        path = current_wallpaper_path()
+        # Sampling a tiny thumbnail is inexpensive; checking every 5 seconds also
+        # picks up Windows wallpaper slideshows without a separate watcher thread.
+        new_palette = palette_for_wallpaper(path)
+        signature = tuple(sorted(new_palette.items()))
+        if signature != self.current_theme_signature:
+            set_palette_globals(new_palette)
+            self.current_theme_signature = signature
+            self.current_wallpaper = path
+            # Canvas avatar artwork is drawn imperatively, so recreate a hidden
+            # overlay on the next drag to ensure it uses the new palette.
+            self.overlay.reset_for_theme_change()
+            recolor_widget_tree(self.root, new_palette)
+            try:
+                self.root.configure(bg=BG)
+            except tk.TclError:
+                pass
+            if self.tray is not None:
+                try:
+                    from PIL import Image, ImageDraw
+                    image = Image.new("RGBA", (64, 64), tuple(int(new_palette["BG"][i:i+2], 16) for i in (1, 3, 5)) + (255,))
+                    draw = ImageDraw.Draw(image)
+                    accent = tuple(int(new_palette["CYAN"][i:i+2], 16) for i in (1, 3, 5)) + (255,)
+                    draw.rounded_rectangle((7, 7, 57, 57), radius=13, fill=tuple(int(new_palette["PANEL2"][i:i+2], 16) for i in (1, 3, 5)) + (255,), outline=accent, width=3)
+                    draw.ellipse((22, 22, 42, 42), fill=accent)
+                    self.tray.icon = image
+                except Exception:
+                    pass
+        self.root.after(5000, self._refresh_wallpaper_theme)
 
     def _setup_mouse_listener(self):
         try:
@@ -512,6 +632,10 @@ def main():
     parser = argparse.ArgumentParser(description="AirLink Windows drag-to-share prototype")
     parser.add_argument("--background", action="store_true", help="start hidden in the system tray")
     args = parser.parse_args()
+    # Set the palette before constructing widgets, so first launch immediately
+    # matches the current Windows wallpaper instead of flashing a default tint.
+    initial_palette = palette_for_wallpaper(current_wallpaper_path())
+    set_palette_globals(initial_palette)
     root = TkinterDnD.Tk()
     try:
         root.tk.call("tk", "scaling", 1.1)

@@ -1,36 +1,52 @@
-# AirLink — Windows Drag-to-Share Panel Prototype
+# AirLink — Wallpaper-Adaptive Windows Drag-to-Share Prototype
 
-This updated prototype keeps the existing **Nearby / Activity / Settings** dashboard, and adds a Windows background mode that reveals a vertical AirLink device panel when a global left-button drag gesture is detected. The panel is a file drop target: drag a file from File Explorer and drop it onto one of the sample device cards.
+AirLink is a Windows desktop UI prototype exploring an AirDrop-like drag-to-share workflow. The normal Nearby / Activity / Settings dashboard stays available; when a global mouse drag is detected, a compact receiver panel can appear along the right edge of the desktop.
+
+## Wallpaper-adaptive theme
+
+- At launch, AirLink samples the current Windows desktop wallpaper and derives a dominant accent hue.
+- The dashboard and sharing panel use a dark tinted palette based on that hue, so blue, green, purple, and other colorful wallpapers produce different accent and surface tints.
+- AirLink checks the wallpaper periodically and updates the palette when the wallpaper changes.
+- This is a **wallpaper-colour-matched theme**, not a true Windows Acrylic/Mica blur effect. The UI uses Tkinter, which does not provide native Windows backdrop blur by itself.
 
 ## Quick start
 
-1. Extract the entire ZIP to a normal folder (for example, `Downloads\AirLink_Windows_5m_Demo`). Do not run the app from inside the ZIP preview.
-2. Double-click `setup_and_run.bat`. This installs the dependencies, then opens the familiar dashboard.
-3. The AirLink icon should appear in the Windows system tray. Closing the dashboard window hides it to the tray; choose **Open AirLink** from the tray icon to reopen it.
-4. Double-click `start_background.bat` to start AirLink hidden in the tray. You do not need to keep the dashboard open.
-5. To start AirLink automatically when you sign into Windows, run `install_startup.bat` once. To undo this, run `remove_startup.bat`.
+1. Extract the complete ZIP into a normal folder; do not run the project from inside ZIP preview.
+2. Double-click `setup_and_run.bat`. It installs the Python dependencies and opens the dashboard.
+3. Closing the dashboard hides it to the system tray. Choose **Open AirLink** from the tray menu to reopen it.
+4. To start it hidden, double-click `start_background.bat`.
+5. To start AirLink automatically when you sign into Windows, run `install_startup.bat` once. Use `remove_startup.bat` to undo this.
 
-## How to test the panel
+## Test the drag panel
 
-1. Start AirLink with `start_background.bat`.
-2. Open File Explorer and drag a file. Once a drag gesture is detected, a right-side panel should appear.
-3. Drop the file directly on one of the device cards. The panel will show that a file drop was detected and remember the selected file/receiver in the dashboard.
-4. Use the AirLink tray menu to reopen the old dashboard.
+1. Start AirLink in the background with `start_background.bat`.
+2. Drag a file from File Explorer. The global mouse-drag detector should show the right-side receiver panel.
+3. Drop the file onto a sample device card. AirLink remembers the selected file/receiver and displays a demo status.
+4. Open the dashboard from the system tray to see the selected file and receiver.
 
-## Honest current limitations
-
-- The three device names and RSSI values are sample data, not nearby computers discovered over Bluetooth or Wi-Fi.
-- The current app detects global mouse drag gestures. Since a low-level mouse hook cannot reliably tell whether every drag originates from a file object, the panel may also appear during some non-file left-button drags; the panel only processes supported file drops.
-- The 5 m rule is an illustrative RSSI policy, not reliable physical-distance measurement.
-- This prototype does **not transmit file bytes to another computer yet**. It detects a local file drop and previews the selected recipient. Real pairing, discovery, secure socket transfer, receiver approval, and transfer-progress handling remain to be implemented.
-
-## Commands
+## Run checks
 
 ```powershell
 python -m pip install -r requirements.txt
-python -m unittest -v test_proximity_policy.py
+python -m unittest -v
 python app.py
 python app.py --background
 ```
 
-Windows only. If Windows prompts about Python or security software, review the prompt before allowing anything. The app does not need administrator privileges for its normal operation.
+## Important limitations
+
+- Device names and RSSI values are sample data, not computers discovered through Bluetooth or Wi-Fi.
+- The global mouse hook detects general drag gestures; it cannot guarantee that every gesture comes from a file in Explorer, so the panel may briefly appear during some non-file drags.
+- The approximate 5 m rule is a demonstration policy based on illustrative RSSI values. Wi-Fi/Bluetooth signal strength cannot guarantee a physical 5 m boundary.
+- **Actual laptop-to-laptop file transfer is not implemented.** Pairing, real device discovery, secure networking, receiver approval, and byte transfer still need to be developed.
+- Dynamic palette sampling works when Windows exposes a readable wallpaper image path. If it cannot read the wallpaper, AirLink falls back to the default blue palette.
+
+## Project structure
+
+- `app.py` — dashboard, tray, and drag panel
+- `wallpaper_theme.py` — wallpaper sampling, palette generation, and widget recoloring
+- `proximity_policy.py` — demo proximity gate
+- `test_proximity_policy.py` — proximity policy unit tests
+- `test_wallpaper_theme.py` — adaptive palette tests
+
+Windows only. If Windows prompts about Python or security software, review the prompt before allowing it. AirLink does not require administrator privileges for normal use.
