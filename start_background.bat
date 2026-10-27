@@ -1,11 +1,8 @@
 @echo off
 cd /d "%~dp0"
-python -m pip install -r requirements.txt
-if errorlevel 1 goto failed
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start_background.ps1"
-if errorlevel 1 goto failed
-goto end
-:failed
-echo Background launch failed. Copy the error above.
-pause
-:end
+where pythonw.exe >nul 2>nul
+if errorlevel 1 (
+  start "AirLink" python app.py --background
+) else (
+  start "AirLink" pythonw.exe "%~dp0app.py" --background
+)

@@ -1,17 +1,17 @@
 @echo off
+setlocal
 cd /d "%~dp0"
-echo Installing AirLink drag-and-drop dependencies...
-python -m pip install --upgrade pip
-if errorlevel 1 goto failed
+echo ======================================
+echo AirLink Glass UI - First-time setup
+echo ======================================
 python -m pip install -r requirements.txt
-if errorlevel 1 goto failed
+if errorlevel 1 (
+  echo.
+  echo Dependency installation failed. Confirm Python is installed and try again.
+  pause
+  exit /b 1
+)
 echo.
-echo Starting AirLink dashboard. Close/minimize it to keep AirLink in the tray.
+echo Starting AirLink dashboard...
 python app.py
-if errorlevel 1 goto failed
-goto end
-:failed
-echo.
-echo Setup or launch failed. Copy the error shown above and send it to ChatGPT.
-pause
-:end
+if errorlevel 1 pause

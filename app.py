@@ -1,651 +1,1107 @@
-"""AirLink: Windows drag-to-share panel prototype.
+"""AirLink Glass UI — Windows wallpaper-adaptive drag-to-share UI prototype.
 
-The mouse hook only detects drag gestures. tkinterdnd2 receives actual file drops.
-Device discovery, RSSI values, and the transfer action remain demo-only.
+The app uses Qt translucent widgets plus the Windows Acrylic composition API.
+Device discovery and byte transfer are intentionally not claimed as implemented.
 """
 from __future__ import annotations
 
 import argparse
-import queue
+import ctypes
+import math
+import os
+import sys
 import threading
 import time
 from pathlib import Path
-import tkinter as tk
-from tkinter import filedialog, messagebox
+from typing import Optional
 
-try:
-    from tkinterdnd2 import DND_FILES, TkinterDnD
-except ImportError as exc:  # Explain setup clearly instead of failing with a cryptic traceback.
-    raise SystemExit(
-        "AirLink needs its Windows drag-and-drop dependencies.\n"
-        "Run setup_and_run.bat once, or run: python -m pip install -r requirements.txt"
-    ) from exc
-
-from proximity_policy import ProximityPolicy
-from wallpaper_theme import (
-    current_wallpaper_path, palette_for_wallpaper, recolor_widget_tree, register_palette,
+from PySide6.QtCore import QObject, QPoint, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QBrush, QAction
+from PySide6.QtWidgets import (
+    QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow,
+    QMenu, QMessageBox, QFileDialog, QPushButton, QSizePolicy, QSystemTrayIcon,
+    QVBoxLayout, QWidget, QSpacerItem,
 )
 
-BG = "#0b1020"
-PANEL = "#121a2e"
-PANEL2 = "#17223a"
-BORDER = "#263450"
-TEXT = "#edf3ff"
-MUTED = "#9aa9c4"
-BLUE = "#6aa8ff"
-CYAN = "#61e6dc"
-GREEN = "#69e0a3"
-ORANGE = "#ffca78"
-PANEL3 = "#13223a"
-BORDER_ACCENT = "#2a4770"
-BUTTON_TEXT = "#07101f"
-CURRENT_PALETTE = {
-    "BG": BG, "PANEL": PANEL, "PANEL2": PANEL2, "PANEL3": PANEL3, "BORDER": BORDER,
-    "BORDER_ACCENT": BORDER_ACCENT, "TEXT": TEXT, "MUTED": MUTED, "BLUE": BLUE,
-    "CYAN": CYAN, "GREEN": GREEN, "ORANGE": ORANGE, "BUTTON_TEXT": BUTTON_TEXT,
-}
+try:
+    from pynput import mouse
+except ImportError:
+    mouse = None
 
-def set_palette_globals(palette):
-    """Update the legacy constants used by the UI builders to the live palette."""
-    global BG, PANEL, PANEL2, PANEL3, BORDER, BORDER_ACCENT, TEXT, MUTED
-    global BLUE, CYAN, GREEN, ORANGE, BUTTON_TEXT, CURRENT_PALETTE
-    BG = palette["BG"]
-    PANEL = palette["PANEL"]
-    PANEL2 = palette["PANEL2"]
-    PANEL3 = palette["PANEL3"]
-    BORDER = palette["BORDER"]
-    BORDER_ACCENT = palette["BORDER_ACCENT"]
-    TEXT = palette["TEXT"]
-    MUTED = palette["MUTED"]
-    BLUE = palette["BLUE"]
-    CYAN = palette["CYAN"]
-    GREEN = palette["GREEN"]
-    ORANGE = palette["ORANGE"]
-    BUTTON_TEXT = palette["BUTTON_TEXT"]
-    CURRENT_PALETTE = dict(palette)
-    register_palette(CURRENT_PALETTE)
+from proximity_policy import ProximityPolicy
+from wallpaper_theme import current_wallpaper_path, palette_for_wallpaper
 
 
-class AirLink:
-    """The familiar full dashboard; it can be hidden to the system tray."""
-
-    def __init__(self, root):
-        self.root = root
-        root.title("AirLink — Windows proximity sharing")
-        root.geometry("1050x720")
-        root.minsize(900, 620)
-        root.configure(bg=BG)
-        self.policy = ProximityPolicy(target_metres=5)
-        self.device = None
-        self.file = None
-        self.history = []
-        # These names and signal values are deliberately sample data.
-        self.devices = [
-            ("DESKTOP-STUDIO", "Windows laptop", -48),
-            ("Study Laptop", "Windows laptop", -62),
-            ("Room PC", "Windows laptop", -75),
-        ]
-        self.page = "Nearby"
-        self.build()
-        self.nearby()
-
-    def label(self, p, t, size=10, color=TEXT, bold=False, **kw):
-        return tk.Label(
-            p,
-            text=t,
-            bg=kw.pop("bg", p.cget("bg")),
-            fg=color,
-            font=("Segoe UI", size, "bold" if bold else "normal"),
-            **kw,
-        )
-
-    def btn(self, p, t, cmd, primary=False):
-        return tk.Button(
-            p,
-            text=t,
-            command=cmd,
-            bg=BLUE if primary else PANEL2,
-            fg=BUTTON_TEXT if primary else TEXT,
-            activebackground=CYAN,
-            relief="flat",
-            bd=0,
-            cursor="hand2",
-            font=("Segoe UI", 10, "bold"),
-            padx=14,
-            pady=9,
-        )
-
-    def build(self):
-        top = tk.Frame(self.root, bg=BG)
-        top.pack(fill="x", padx=26, pady=20)
-        self.label(top, "◉", 28, CYAN, True).pack(side="left", padx=(0, 12))
-        title = tk.Frame(top, bg=BG)
-        title.pack(side="left")
-        self.label(title, "AirLink", 22, TEXT, True).pack(anchor="w")
-        self.label(title, "WINDOWS ONLY  ·  APPROX. 5 METRE POLICY", 8, MUTED, True).pack(anchor="w")
-        self.label(top, "● BACKGROUND READY", 9, GREEN, True, bg="#112b2a").pack(side="right", pady=10, padx=10)
-
-        body = tk.Frame(self.root, bg=BG)
-        body.pack(fill="both", expand=True, padx=26, pady=(0, 18))
-        side = tk.Frame(body, bg=PANEL, width=190, highlightbackground=BORDER, highlightthickness=1)
-        side.pack(side="left", fill="y")
-        side.pack_propagate(False)
-        self.label(side, "WORKSPACE", 9, MUTED, True).pack(anchor="w", padx=16, pady=(22, 10))
-        self.nav = {}
-        for name in ("Nearby", "Activity", "Settings"):
-            b = tk.Button(
-                side,
-                text="  " + name,
-                anchor="w",
-                command=lambda n=name: self.show(n),
-                bg=PANEL,
-                fg=TEXT,
-                activebackground=PANEL2,
-                relief="flat",
-                bd=0,
-                font=("Segoe UI", 11),
-                padx=14,
-                pady=12,
-            )
-            b.pack(fill="x", padx=8)
-            self.nav[name] = b
-        self.label(
-            side,
-            "Drag a file anywhere on the desktop.\nAirLink's receiver panel appears while dragging.",
-            9,
-            MUTED,
-            justify="left",
-            wraplength=155,
-        ).pack(side="bottom", anchor="w", padx=16, pady=18)
-        self.content = tk.Frame(body, bg=BG)
-        self.content.pack(side="left", fill="both", expand=True, padx=(20, 0))
-        self.label(
-            self.root,
-            "SAMPLE DEVICES · NO REAL DISCOVERY OR FILE TRANSFER YET",
-            8,
-            "#657693",
-            True,
-        ).pack(anchor="w", padx=26, pady=(0, 10))
-
-    def show(self, name):
-        self.page = name
-        for w in self.content.winfo_children():
-            w.destroy()
-        for n, b in self.nav.items():
-            b.configure(bg=PANEL2 if n == name else PANEL, fg=CYAN if n == name else TEXT)
-        {"Nearby": self.nearby, "Activity": self.activity, "Settings": self.settings}[name]()
-
-    def nearby(self):
-        head = tk.Frame(self.content, bg=BG)
-        head.pack(fill="x", pady=(0, 16))
-        self.label(head, "Nearby Windows laptops", 24, TEXT, True).pack(anchor="w")
-        self.label(head, "Select a sample device to preview the 5 m policy gate.", 10, MUTED).pack(anchor="w", pady=(5, 0))
-        hero = tk.Frame(self.content, bg=PANEL3, highlightbackground=BORDER_ACCENT, highlightthickness=1)
-        hero.pack(fill="x", pady=(0, 16))
-        self.label(hero, "PROXIMITY GATE · THREE STABLE SAMPLES · FAIL CLOSED", 10, CYAN, True, bg=PANEL3).pack(anchor="w", padx=18, pady=(16, 6))
-        self.label(hero, "Pairing + connection + fresh signal are required.", 13, TEXT, True, bg=PANEL3).pack(anchor="w", padx=18, pady=(0, 16))
-        self.btn(hero, "＋ Choose file", self.choose, True).pack(anchor="e", padx=16, pady=(0, 14))
-
-        grid = tk.Frame(self.content, bg=BG)
-        grid.pack(fill="x")
-        for i, (name, kind, rssi) in enumerate(self.devices):
-            d = self.policy.evaluate(rssi, True, True, [rssi - 1, rssi, rssi + 1])
-            card = tk.Frame(
-                grid,
-                bg=PANEL,
-                highlightbackground=BLUE if self.device == name else BORDER,
-                highlightthickness=2 if self.device == name else 1,
-            )
-            card.grid(row=i // 2, column=i % 2, sticky="nsew", padx=6, pady=6)
-            grid.grid_columnconfigure(i % 2, weight=1)
-            card.bind("<Button-1>", lambda e, n=name: self.select(n))
-            self.label(card, "▣", 25, CYAN if d.allowed else ORANGE, True, bg=PANEL).pack(anchor="w", padx=14, pady=(12, 0))
-            self.label(card, name, 12, TEXT, True).pack(anchor="w", padx=14, pady=(6, 2))
-            self.label(card, kind, 9, MUTED).pack(anchor="w", padx=14)
-            self.label(card, f"RSSI {rssi} dBm · rough estimate {d.estimated_metres:.1f} m", 9, MUTED).pack(anchor="w", padx=14, pady=(10, 3))
-            self.label(card, "ELIGIBLE (DEMO)" if d.allowed else "BLOCKED BY THRESHOLD", 8, GREEN if d.allowed else ORANGE, True).pack(anchor="w", padx=14, pady=(0, 14))
-            for w in card.winfo_children():
-                w.bind("<Button-1>", lambda e, n=name: self.select(n))
-
-        action = tk.Frame(self.content, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
-        action.pack(fill="x", pady=(14, 0))
-        self.label(action, "RECIPIENT  ·  " + (self.device or "none selected"), 9, CYAN if self.device else MUTED, True).pack(anchor="w", padx=16, pady=(13, 4))
-        self.label(action, "FILE  ·  " + (Path(self.file).name if self.file else "No file selected"), 10, TEXT, True).pack(anchor="w", padx=16, pady=(0, 10))
-        self.btn(action, "Send file →", self.send, True).pack(anchor="e", padx=14, pady=(0, 12))
-
-    def select(self, name):
-        self.device = name
-        self.show("Nearby")
-
-    def choose(self):
-        f = filedialog.askopenfilename(parent=self.root)
-        if f:
-            self.file = f
-            self.show("Nearby")
-
-    def send(self):
-        if not self.device:
-            messagebox.showwarning("Choose device", "Select a sample laptop first.", parent=self.root)
-            return
-        rssi = next(r for n, _, r in self.devices if n == self.device)
-        decision = self.policy.evaluate(rssi, True, True, [rssi - 1, rssi, rssi + 1])
-        if not decision.allowed:
-            messagebox.showwarning("Blocked by proximity policy", f"Sample RSSI {rssi} dBm is below the illustrative threshold.\nNo send allowed.", parent=self.root)
-            return
-        if not self.file:
-            self.choose()
-        if not self.file:
-            return
-        win = tk.Toplevel(self.root)
-        win.title("Transfer preview")
-        win.configure(bg=BG)
-        win.geometry("460x250")
-        self.label(win, "DEMO TRANSFER PREVIEW", 10, CYAN, True).pack(anchor="w", padx=24, pady=(24, 8))
-        self.label(win, Path(self.file).name, 13, TEXT, True, wraplength=400).pack(anchor="w", padx=24)
-        self.label(win, f"Target: {self.device}", 9, MUTED).pack(anchor="w", padx=24, pady=8)
-        self.label(win, "No file data is transmitted. Real networking is not implemented yet.", 10, ORANGE, wraplength=410, justify="left").pack(anchor="w", padx=24, pady=12)
-
-    def accept_drop(self, file_path: str, device_name: str, status_callback):
-        """Record selection from the overlay without claiming a transfer occurred."""
-        p = Path(file_path)
-        if not p.exists() or not p.is_file():
-            status_callback("That drop was not a regular file.", ORANGE)
-            return
-        rssi = next(r for n, _, r in self.devices if n == device_name)
-        d = self.policy.evaluate(rssi, True, True, [rssi - 1, rssi, rssi + 1])
-        self.file = str(p)
-        self.device = device_name
-        if self.page == "Nearby":
-            self.show("Nearby")
-        if not d.allowed:
-            status_callback(f"{p.name}: blocked by demo range threshold.", ORANGE)
-        else:
-            status_callback(f"{p.name} → {device_name}\nDrop detected; actual transfer is not implemented.", CYAN)
-
-    def activity(self):
-        self.label(self.content, "Activity", 24, TEXT, True).pack(anchor="w", pady=(0, 15))
-        self.label(self.content, "No real transfers recorded. This prototype does not transmit file data.", 11, MUTED, wraplength=660, justify="left").pack(anchor="w")
-
-    def settings(self):
-        self.label(self.content, "Range & security policy", 24, TEXT, True).pack(anchor="w", pady=(0, 8))
-        self.label(self.content, "Target: approximately 5 m, not a guaranteed boundary.", 11, ORANGE).pack(anchor="w", pady=(0, 18))
-        rows = [
-            ("Gate", "Fail closed", "Reject unpaired, disconnected, stale or unstable signals"),
-            ("Stability", "3 recent samples", "Reject readings that fluctuate too much"),
-            ("Signal threshold", "-65 dBm example", "Must be calibrated per hardware and environment"),
-            ("Connection loss", "Pause / reject", "A real transfer must re-check policy while sending"),
-            ("Physical distance", "Not guaranteed", "RSSI cannot accurately prove a 5 m radius"),
-            ("Network transfer", "Not implemented", "This remains a visual UI prototype"),
-        ]
-        for a, b, c in rows:
-            box = tk.Frame(self.content, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
-            box.pack(fill="x", pady=5)
-            self.label(box, a, 11, TEXT, True).pack(anchor="w", padx=14, pady=(10, 2))
-            self.label(box, b, 9, CYAN, True).pack(anchor="w", padx=14)
-            self.label(box, c, 9, MUTED, wraplength=620, justify="left").pack(anchor="w", padx=14, pady=(3, 10))
+DEVICES = [
+    ("DESKTOP-STUDIO", "Windows laptop", -48),
+    ("Study Laptop", "Windows laptop", -62),
+    ("Room PC", "Windows PC", -75),
+]
 
 
-class DragOverlay:
-    """A compact, sketch-inspired right-edge device dock revealed during drag."""
+def rgb(hex_color: str) -> tuple[int, int, int]:
+    raw = hex_color.lstrip("#")
+    return tuple(int(raw[i:i + 2], 16) for i in (0, 2, 4))
 
-    def __init__(self, root, dashboard: AirLink, event_queue: queue.Queue):
-        self.root = root
-        self.dashboard = dashboard
-        self.events = event_queue
-        self.window = None
-        self.status_label = None
-        self.device_widgets = {}
-        self.last_drop_at = 0.0
 
-    def show(self):
-        if self.window is None or not self.window.winfo_exists():
-            self._build()
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        height = min(560, max(420, sh - 72))
-        width = 224
-        # Keep the receiver dock against the desktop's right edge, like the user's sketch.
-        x = max(0, sw - width - 14)
-        y = max(18, (sh - height) // 2)
-        self.window.geometry(f"{width}x{height}+{x}+{y}")
-        self.window.deiconify()
-        self.window.lift()
-        self.window.attributes("-topmost", True)
-        self.window.update_idletasks()
+def rgba(hex_color: str, alpha: int) -> str:
+    r, g, b = rgb(hex_color)
+    return f"rgba({r}, {g}, {b}, {alpha})"
 
-    def _build(self):
-        w = tk.Toplevel(self.root)
-        self.window = w
-        w.title("AirLink drop panel")
-        w.configure(bg=BG)
-        w.overrideredirect(True)
-        w.attributes("-topmost", True)
+
+def blend(hex_a: str, hex_b: str, factor: float) -> str:
+    a, b = rgb(hex_a), rgb(hex_b)
+    factor = max(0.0, min(1.0, factor))
+    vals = [round(a[i] * (1 - factor) + b[i] * factor) for i in range(3)]
+    return "#{:02x}{:02x}{:02x}".format(*vals)
+
+
+def make_icon(size: int = 64, accent: str = "#6aa8ff") -> QIcon:
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(QColor("#101a2f")))
+    p.drawRoundedRect(2, 2, size - 4, size - 4, size * .22, size * .22)
+    p.setBrush(QBrush(QColor(accent)))
+    # Stylized AirLink / transfer glyph.
+    points = [QPoint(int(size*.23), int(size*.70)), QPoint(int(size*.48), int(size*.24)),
+              QPoint(int(size*.77), int(size*.70)), QPoint(int(size*.58), int(size*.70)),
+              QPoint(int(size*.48), int(size*.53)), QPoint(int(size*.39), int(size*.70))]
+    from PySide6.QtGui import QPolygon
+    p.drawPolygon(QPolygon(points))
+    p.end()
+    return QIcon(pix)
+
+
+def make_stylesheet(palette: dict[str, str]) -> str:
+    """Generate a translucent glass stylesheet from the current wallpaper palette."""
+    accent = palette["BLUE"]
+    accent_hi = palette["CYAN"]
+    return f"""
+    * {{
+        color: {palette['TEXT']};
+        font-family: 'Segoe UI';
+        font-size: 10pt;
+        outline: 0;
+    }}
+    QWidget {{ background: transparent; }}
+    QLabel {{ background: transparent; }}
+    QFrame#GlassShell {{
+        background-color: {rgba(palette['BG'], 162)};
+        border: 1px solid rgba(255,255,255,68);
+        border-radius: 22px;
+    }}
+    QFrame#TitleBar {{ background: transparent; border: none; }}
+    QFrame#Sidebar {{
+        background-color: {rgba(palette['PANEL'], 126)};
+        border: 1px solid rgba(255,255,255,28);
+        border-radius: 17px;
+    }}
+    QFrame#GlassCard {{
+        background-color: {rgba(palette['PANEL'], 132)};
+        border: 1px solid rgba(255,255,255,45);
+        border-radius: 16px;
+    }}
+    QFrame#HeroCard {{
+        background-color: {rgba(accent, 43)};
+        border: 1px solid {rgba(accent_hi, 125)};
+        border-radius: 18px;
+    }}
+    QFrame#DeviceCard {{
+        background-color: {rgba(palette['PANEL2'], 104)};
+        border: 1px solid rgba(255,255,255,44);
+        border-radius: 15px;
+    }}
+    QFrame#DeviceCard[selected="true"] {{
+        background-color: {rgba(accent, 56)};
+        border: 1px solid {rgba(accent_hi, 205)};
+    }}
+    QFrame#DeviceCard:hover {{
+        background-color: {rgba(accent, 48)};
+        border: 1px solid {rgba(accent_hi, 155)};
+    }}
+    QFrame#DropSurface {{
+        background-color: {rgba(palette['PANEL2'], 102)};
+        border: 1px dashed {rgba(accent_hi, 185)};
+        border-radius: 16px;
+    }}
+    QLabel#AppMark {{
+        background-color: {rgba(accent, 235)};
+        border-radius: 11px;
+        color: #ffffff;
+        font-size: 16pt;
+        font-weight: 800;
+    }}
+    QLabel#PageTitle {{ font-size: 23pt; font-weight: 700; }}
+    QLabel#SectionTitle {{ font-size: 11pt; font-weight: 650; }}
+    QLabel#Muted {{ color: {palette['MUTED']}; }}
+    QLabel#Accent {{ color: {accent_hi}; font-weight: 650; }}
+    QLabel#Eyebrow {{ color: {accent_hi}; font-size: 8pt; font-weight: 750; letter-spacing: 1px; }}
+    QLabel#Badge {{
+        background-color: {rgba(accent, 56)};
+        border: 1px solid {rgba(accent_hi, 88)};
+        border-radius: 9px;
+        padding: 5px 9px;
+        font-size: 8pt;
+        font-weight: 650;
+    }}
+    QPushButton {{
+        background-color: {rgba(palette['PANEL2'], 124)};
+        border: 1px solid rgba(255,255,255,42);
+        border-radius: 10px;
+        padding: 9px 13px;
+        color: {palette['TEXT']};
+        font-weight: 600;
+    }}
+    QPushButton:hover {{ background-color: {rgba(accent, 66)}; border-color: {rgba(accent_hi, 175)}; }}
+    QPushButton:pressed {{ background-color: {rgba(accent, 115)}; }}
+    QPushButton#PrimaryButton {{
+        background-color: {rgba(accent, 210)};
+        border: 1px solid {rgba(accent_hi, 200)};
+        color: #ffffff;
+        font-weight: 700;
+    }}
+    QPushButton#PrimaryButton:hover {{ background-color: {rgba(accent_hi, 222)}; color: #091321; }}
+    QPushButton#TitleButton {{
+        border: none; background-color: rgba(255,255,255,17); border-radius: 9px;
+        padding: 4px; min-width: 29px; max-width: 29px; min-height: 27px; max-height: 27px;
+        font-size: 12pt;
+    }}
+    QPushButton#TitleButton:hover {{ background-color: {rgba(accent, 100)}; }}
+    QPushButton#CloseButton:hover {{ background-color: rgba(232,75,90,205); }}
+    QPushButton#NavButton {{
+        text-align: left; padding: 11px 13px; border: 1px solid transparent;
+        background-color: transparent; border-radius: 10px; font-weight: 550;
+    }}
+    QPushButton#NavButton:checked {{
+        background-color: {rgba(accent, 62)}; border: 1px solid {rgba(accent_hi, 95)};
+        color: {accent_hi}; font-weight: 700;
+    }}
+    QPushButton#NavButton:hover:!checked {{ background-color: rgba(255,255,255,22); }}
+    QLineEdit {{
+        background-color: rgba(255,255,255,17); border: 1px solid rgba(255,255,255,42);
+        border-radius: 10px; padding: 9px 11px;
+    }}
+    QScrollArea {{ border: none; background: transparent; }}
+    QToolTip {{ color: {palette['TEXT']}; background: {rgba(palette['PANEL'], 245)}; border: 1px solid {palette['BORDER']}; padding: 5px; }}
+    """
+
+
+# Windows WCA_ACCENT_POLICY acrylic. If unsupported, Qt's alpha/QSS remains as fallback.
+def apply_windows_acrylic(widget: QWidget, palette: dict[str, str], alpha: int = 0xB8) -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        from ctypes import wintypes
+
+        class ACCENT_POLICY(ctypes.Structure):
+            _fields_ = [
+                ("AccentState", ctypes.c_int),
+                ("AccentFlags", ctypes.c_int),
+                ("GradientColor", ctypes.c_uint),
+                ("AnimationId", ctypes.c_int),
+            ]
+
+        class WINDOWCOMPOSITIONATTRIBDATA(ctypes.Structure):
+            _fields_ = [
+                ("Attribute", ctypes.c_int),
+                ("Data", ctypes.c_void_p),
+                ("SizeOfData", ctypes.c_size_t),
+            ]
+
+        r, g, b = rgb(palette["BG"])
+        # AccentPolicy GradientColor is ARGB packed as 0xAABBGGRR on current builds.
+        gradient = ((alpha & 0xff) << 24) | ((b & 0xff) << 16) | ((g & 0xff) << 8) | (r & 0xff)
+        policy = ACCENT_POLICY(4, 2, gradient, 0)  # ACCENT_ENABLE_ACRYLICBLURBEHIND
+        data = WINDOWCOMPOSITIONATTRIBDATA(19, ctypes.addressof(policy), ctypes.sizeof(policy))  # WCA_ACCENT_POLICY
+        function = ctypes.windll.user32.SetWindowCompositionAttribute
+        function.argtypes = [wintypes.HWND, ctypes.POINTER(WINDOWCOMPOSITIONATTRIBDATA)]
+        function.restype = wintypes.BOOL
+        hwnd = wintypes.HWND(int(widget.winId()))
+        ok = bool(function(hwnd, ctypes.byref(data)))
+        # Windows 11 supports an additional native acrylic/transient backdrop.
+        # Request it as well; unsupported builds simply keep the AccentPolicy result.
         try:
-            w.attributes("-alpha", 0.98)
-        except tk.TclError:
+            dwm = ctypes.windll.dwmapi.DwmSetWindowAttribute
+            dwm.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+            dwm.restype = ctypes.c_long
+            backdrop = ctypes.c_int(3)  # DWMSBT_TRANSIENTWINDOW (acrylic-like)
+            dwm(hwnd, 38, ctypes.byref(backdrop), ctypes.sizeof(backdrop))  # DWMWA_SYSTEMBACKDROP_TYPE
+            dark = ctypes.c_int(1)
+            dwm(hwnd, 20, ctypes.byref(dark), ctypes.sizeof(dark))  # DWMWA_USE_IMMERSIVE_DARK_MODE
+            pref = ctypes.c_int(2)  # DWMWCP_ROUND
+            dwm(hwnd, 33, ctypes.byref(pref), ctypes.sizeof(pref))  # DWMWA_WINDOW_CORNER_PREFERENCE
+        except Exception:
             pass
-        w.protocol("WM_DELETE_WINDOW", self.hide)
-        w.bind("<Escape>", lambda _e: self.hide())
-        w.drop_target_register(DND_FILES)
-        w.dnd_bind("<<DropEnter>>", self._drop_enter)
-        w.dnd_bind("<<DropPosition>>", self._drop_position)
-        w.dnd_bind("<<DropLeave>>", self._drop_leave)
-        w.dnd_bind("<<Drop>>", self._drop)
-
-        # Outer dock. The regular dashboard is intentionally left untouched.
-        shell = tk.Frame(w, bg=BG, highlightbackground=BORDER, highlightthickness=1)
-        shell.pack(fill="both", expand=True, padx=3, pady=3)
-
-        head = tk.Frame(shell, bg=PANEL)
-        head.pack(fill="x", padx=1, pady=(1, 8))
-        title_row = tk.Frame(head, bg=PANEL)
-        title_row.pack(fill="x", padx=11, pady=(11, 5))
-        tk.Label(title_row, text="◉", bg=PANEL, fg=CYAN, font=("Segoe UI", 19, "bold")).pack(side="left", padx=(0, 7))
-        tk.Label(title_row, text="AirLink", bg=PANEL, fg=TEXT, font=("Segoe UI", 15, "bold")).pack(side="left")
-        tk.Button(title_row, text="×", command=self.hide, bg=PANEL2, fg=MUTED,
-                  activebackground=BORDER, activeforeground=TEXT, relief="flat", bd=0,
-                  padx=6, cursor="hand2").pack(side="right")
-        tk.Label(head, text="DROP FILE ON A DEVICE", bg=PANEL, fg=CYAN,
-                 font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=12, pady=(0, 3))
-        tk.Label(head, text="Nearby Windows laptops", bg=PANEL, fg=MUTED,
-                 font=("Segoe UI", 8)).pack(anchor="w", padx=12, pady=(0, 10))
-
-        people = tk.Frame(shell, bg=BG)
-        people.pack(fill="both", expand=True, padx=7)
-        for index, (name, _kind, rssi) in enumerate(self.dashboard.devices):
-            decision = self.dashboard.policy.evaluate(rssi, True, True, [rssi - 1, rssi, rssi + 1])
-            allowed = decision.allowed
-            card_bg = PANEL
-            card = tk.Frame(people, bg=card_bg, highlightbackground=BORDER, highlightthickness=1,
-                            cursor="hand2")
-            card.pack(fill="x", pady=4)
-            self.device_widgets[name] = card
-
-            row = tk.Frame(card, bg=card_bg)
-            row.pack(fill="x", padx=9, pady=(9, 2))
-            avatar = tk.Canvas(row, width=34, height=34, bg=card_bg, highlightthickness=0,
-                               bd=0, cursor="hand2")
-            avatar.pack(side="left", padx=(0, 8))
-            avatar.create_oval(2, 2, 32, 32, fill=PANEL2, outline=CYAN if allowed else ORANGE, width=2)
-            initials = "".join(part[0] for part in name.replace("-", " ").split()[:2]).upper()[:2]
-            avatar.create_text(17, 17, text=initials or "PC", fill=TEXT,
-                               font=("Segoe UI", 9, "bold"))
-            labels = tk.Frame(row, bg=card_bg)
-            labels.pack(side="left", fill="x", expand=True)
-            tk.Label(labels, text=name, bg=card_bg, fg=TEXT,
-                     font=("Segoe UI", 9, "bold"), anchor="w", wraplength=125,
-                     justify="left").pack(fill="x")
-            tk.Label(labels, text="Windows laptop", bg=card_bg, fg=MUTED,
-                     font=("Segoe UI", 7), anchor="w").pack(fill="x", pady=(2, 0))
-            tk.Label(card, text="DROP HERE" if allowed else "OUT OF DEMO RANGE",
-                     bg=card_bg, fg=GREEN if allowed else ORANGE,
-                     font=("Segoe UI", 7, "bold"), anchor="w").pack(fill="x", padx=12, pady=(3, 9))
-
-            # Subtle hover highlight to make each receiver feel like a drop target.
-            def on_enter(_event, frame=card, ok=allowed):
-                frame.configure(highlightbackground=CYAN if ok else ORANGE, highlightthickness=2)
-            def on_leave(_event, frame=card, ok=allowed):
-                frame.configure(highlightbackground=BORDER, highlightthickness=1)
-            for widget in (card, row, avatar, labels, *row.winfo_children()):
-                widget.bind("<Enter>", on_enter)
-                widget.bind("<Leave>", on_leave)
-
-        footer = tk.Frame(shell, bg=PANEL3, highlightbackground=BORDER_ACCENT, highlightthickness=1)
-        footer.pack(fill="x", padx=7, pady=7)
-        self.status_label = tk.Label(
-            footer,
-            text="Release a file on a laptop card",
-            bg=PANEL3, fg=MUTED,
-            font=("Segoe UI", 8), wraplength=176,
-            justify="left", anchor="w",
-        )
-        self.status_label.pack(fill="x", padx=10, pady=10)
-        tk.Label(shell, text="ESC  ·  close panel", bg=BG, fg=MUTED,
-                 font=("Segoe UI", 7)).pack(anchor="center", pady=(0, 5))
-
-    def hide(self):
-        if self.window is not None and self.window.winfo_exists():
-            self.window.withdraw()
-
-    def reset_for_theme_change(self):
-        """Discard the overlay so Canvas-drawn avatars are recreated in the new tint."""
-        try:
-            if self.window is not None and self.window.winfo_exists():
-                self.window.destroy()
-        except tk.TclError:
-            pass
-        self.window = None
-        self.status_label = None
-        self.device_widgets = {}
-
-    def status(self, text, color=MUTED):
-        if self.status_label is not None and self.status_label.winfo_exists():
-            self.status_label.configure(text=text, fg=color)
-
-    def _drop_enter(self, event):
-        self.status("Drop the file directly on a laptop card.", CYAN)
-        return event.action
-
-    def _drop_position(self, event):
-        return event.action
-
-    def _drop_leave(self, _event):
-        pass
-
-    def _drop(self, event):
-        self.last_drop_at = time.monotonic()
-        try:
-            paths = list(self.root.tk.splitlist(event.data))
-        except tk.TclError:
-            paths = [event.data.strip("{}")]
-        paths = [p for p in paths if p]
-        chosen = None
-        for name, widget in self.device_widgets.items():
-            top = widget.winfo_rooty()
-            bottom = top + widget.winfo_height()
-            pointer_y = getattr(event, "y_root", widget.winfo_rooty() + getattr(event, "y", 0))
-            if top <= pointer_y <= bottom:
-                chosen = name
-                break
-        if not paths:
-            self.status("No file path received. Try dragging from File Explorer.", ORANGE)
-        elif chosen is None:
-            self.status("File detected — drop it on a laptop card.", ORANGE)
-        else:
-            self.dashboard.accept_drop(paths[0], chosen, self.status)
-            if len(paths) > 1:
-                self.status(f"{len(paths)} files dropped; preview uses the first file only.\nActual transfer is not implemented.", ORANGE)
-        self.root.after(3500, self.hide)
-        return getattr(event, "action", "copy")
+        return ok
+    except Exception:
+        return False
 
 
-class AirLinkHost:
-    """Tray, global mouse listener, and the event bridge to Tk's UI thread."""
+class WallpaperTheme:
+    def __init__(self):
+        self.path = current_wallpaper_path()
+        self.palette = palette_for_wallpaper(self.path)
+        self.signature = tuple(sorted(self.palette.items()))
 
-    def __init__(self, root, dashboard, background=False):
-        self.root = root
-        self.dashboard = dashboard
-        self.background = background
-        self.events = queue.Queue()
-        self.overlay = DragOverlay(root, dashboard, self.events)
-        self.listener = None
-        self.tray = None
-        self.alive = True
-        self._pressed = False
-        self._start_xy = None
-        self._dragging = False
-        self._mouse_lock = threading.Lock()
-        self.current_wallpaper = current_wallpaper_path()
-        self.current_theme_signature = tuple(sorted(CURRENT_PALETTE.items()))
-        self._setup_tray()
-        self._setup_mouse_listener()
-        self.root.protocol("WM_DELETE_WINDOW", self.hide_dashboard)
-        if background:
-            self.root.withdraw()
-        self.root.after(60, self._poll_events)
-        self.root.after(5000, self._refresh_wallpaper_theme)
-
-    def _refresh_wallpaper_theme(self):
-        """Poll Windows for wallpaper changes and tint the dashboard/panel accordingly."""
-        if not self.alive:
-            return
+    def refresh(self) -> bool:
         path = current_wallpaper_path()
-        # Sampling a tiny thumbnail is inexpensive; checking every 5 seconds also
-        # picks up Windows wallpaper slideshows without a separate watcher thread.
         new_palette = palette_for_wallpaper(path)
         signature = tuple(sorted(new_palette.items()))
-        if signature != self.current_theme_signature:
-            set_palette_globals(new_palette)
-            self.current_theme_signature = signature
-            self.current_wallpaper = path
-            # Canvas avatar artwork is drawn imperatively, so recreate a hidden
-            # overlay on the next drag to ensure it uses the new palette.
-            self.overlay.reset_for_theme_change()
-            recolor_widget_tree(self.root, new_palette)
-            try:
-                self.root.configure(bg=BG)
-            except tk.TclError:
-                pass
-            if self.tray is not None:
-                try:
-                    from PIL import Image, ImageDraw
-                    image = Image.new("RGBA", (64, 64), tuple(int(new_palette["BG"][i:i+2], 16) for i in (1, 3, 5)) + (255,))
-                    draw = ImageDraw.Draw(image)
-                    accent = tuple(int(new_palette["CYAN"][i:i+2], 16) for i in (1, 3, 5)) + (255,)
-                    draw.rounded_rectangle((7, 7, 57, 57), radius=13, fill=tuple(int(new_palette["PANEL2"][i:i+2], 16) for i in (1, 3, 5)) + (255,), outline=accent, width=3)
-                    draw.ellipse((22, 22, 42, 42), fill=accent)
-                    self.tray.icon = image
-                except Exception:
-                    pass
-        self.root.after(5000, self._refresh_wallpaper_theme)
+        changed = signature != self.signature
+        self.path = path
+        self.palette = new_palette
+        self.signature = signature
+        return changed
 
-    def _setup_mouse_listener(self):
-        try:
-            from pynput import mouse
-        except ImportError:
-            self.events.put(("status", "pynput is missing; rerun setup_and_run.bat.", None))
+
+class DragSignals(QObject):
+    started = Signal()
+    ended = Signal()
+    problem = Signal(str)
+
+
+class GlobalDragDetector:
+    """Detects a global mouse drag; Windows does not expose a universal file-only drag-start event."""
+    def __init__(self, bridge: DragSignals):
+        self.bridge = bridge
+        self.listener = None
+        self.pressed = False
+        self.start_xy = None
+        self.dragging = False
+        self.lock = threading.Lock()
+
+    def start(self):
+        if mouse is None:
+            self.bridge.problem.emit("pynput missing; run setup_and_run.bat to install dependencies.")
             return
-
-        def on_click(x, y, button, pressed):
-            if button != mouse.Button.left:
-                return
-            with self._mouse_lock:
-                if pressed:
-                    self._pressed = True
-                    self._start_xy = (x, y)
-                    self._dragging = False
-                else:
-                    was_dragging = self._dragging
-                    self._pressed = False
-                    self._start_xy = None
-                    self._dragging = False
-                    if was_dragging:
-                        self.events.put(("drag_end", None, None))
-
-        def on_move(x, y):
-            start_drag = False
-            with self._mouse_lock:
-                if self._pressed and self._start_xy and not self._dragging:
-                    sx, sy = self._start_xy
-                    if abs(x - sx) + abs(y - sy) >= 10:
-                        self._dragging = True
-                        start_drag = True
-            if start_drag:
-                self.events.put(("drag_start", None, None))
-
         try:
-            from pynput import mouse
+            def on_click(x, y, button, pressed):
+                if button != mouse.Button.left:
+                    return
+                with self.lock:
+                    if pressed:
+                        self.pressed = True
+                        self.start_xy = (x, y)
+                        self.dragging = False
+                    else:
+                        was_dragging = self.dragging
+                        self.pressed = False
+                        self.start_xy = None
+                        self.dragging = False
+                if not pressed and was_dragging:
+                    self.bridge.ended.emit()
+
+            def on_move(x, y):
+                start = False
+                with self.lock:
+                    if self.pressed and self.start_xy and not self.dragging:
+                        sx, sy = self.start_xy
+                        if math.hypot(x - sx, y - sy) > 9:
+                            self.dragging = True
+                            start = True
+                if start:
+                    self.bridge.started.emit()
+
             self.listener = mouse.Listener(on_move=on_move, on_click=on_click)
             self.listener.daemon = True
             self.listener.start()
         except Exception as exc:
-            self.events.put(("status", f"Global drag detection could not start: {exc}", None))
+            self.bridge.problem.emit(f"Global drag detection could not start: {exc}")
 
-    def _setup_tray(self):
+    def stop(self):
         try:
-            import pystray
-            from PIL import Image, ImageDraw
-        except ImportError:
-            # The UI still works if tray dependencies are missing; setup script installs them.
-            return
-        image = Image.new("RGBA", (64, 64), (11, 16, 32, 255))
-        draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle((7, 7, 57, 57), radius=13, fill=(23, 34, 58, 255), outline=(97, 230, 220, 255), width=3)
-        draw.ellipse((22, 22, 42, 42), fill=(97, 230, 220, 255))
-        menu = pystray.Menu(
-            pystray.MenuItem("Open AirLink", lambda _icon, _item: self.events.put(("open", None, None)), default=True),
-            pystray.MenuItem("Show drop panel", lambda _icon, _item: self.events.put(("show_overlay", None, None))),
-            pystray.MenuItem("Quit AirLink", lambda _icon, _item: self.events.put(("quit", None, None))),
-        )
-        self.tray = pystray.Icon("AirLink", image, "AirLink is running", menu)
-        threading.Thread(target=self.tray.run, name="AirLinkTray", daemon=True).start()
-
-    def hide_dashboard(self):
-        self.root.withdraw()
-
-    def _poll_events(self):
-        if not self.alive:
-            return
-        try:
-            while True:
-                name, payload, extra = self.events.get_nowait()
-                if name == "drag_start":
-                    self.overlay.show()
-                    self.overlay.status("Drop a file onto a laptop card.", CYAN)
-                elif name == "drag_end":
-                    # Give OLE/TkDND a moment to dispatch <<Drop>> before hiding.
-                    self.root.after(900, self._hide_if_no_recent_drop)
-                elif name == "open":
-                    self.root.deiconify()
-                    self.root.lift()
-                elif name == "show_overlay":
-                    self.overlay.show()
-                elif name == "quit":
-                    self.quit()
-                    return
-                elif name == "status":
-                    self.overlay.show()
-                    self.overlay.status(payload, ORANGE)
-        except queue.Empty:
-            pass
-        self.root.after(60, self._poll_events)
-
-    def _hide_if_no_recent_drop(self):
-        if time.monotonic() - self.overlay.last_drop_at > 1.4:
-            self.overlay.hide()
-
-    def quit(self):
-        self.alive = False
-        try:
-            if self.listener is not None:
+            if self.listener:
                 self.listener.stop()
         except Exception:
             pass
-        try:
-            if self.tray is not None:
-                self.tray.stop()
-        except Exception:
-            pass
-        self.root.destroy()
+
+
+class TitleBar(QFrame):
+    def __init__(self, owner: QMainWindow, palette: dict[str, str], title: str):
+        super().__init__()
+        self.owner = owner
+        self.drag_offset: Optional[QPoint] = None
+        self.setObjectName("TitleBar")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(8, 6, 8, 8)
+        row.setSpacing(9)
+        mark = QLabel("A")
+        mark.setObjectName("AppMark")
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark.setFixedSize(36, 36)
+        row.addWidget(mark)
+        brand = QVBoxLayout()
+        brand.setSpacing(0)
+        name = QLabel("AirLink")
+        name.setStyleSheet("font-size: 14pt; font-weight: 750;")
+        sub = QLabel("WALLPAPER-ADAPTIVE GLASS")
+        sub.setObjectName("Muted")
+        sub.setStyleSheet("font-size: 7.5pt; letter-spacing: 1px;")
+        brand.addWidget(name)
+        brand.addWidget(sub)
+        row.addLayout(brand)
+        row.addStretch(1)
+        self.sync = QLabel("●  WALLPAPER SYNC")
+        self.sync.setObjectName("Badge")
+        row.addWidget(self.sync)
+        self.min_btn = QPushButton("—")
+        self.min_btn.setObjectName("TitleButton")
+        self.min_btn.clicked.connect(owner.showMinimized)
+        row.addWidget(self.min_btn)
+        self.close_btn = QPushButton("×")
+        self.close_btn.setObjectName("TitleButton")
+        self.close_btn.clicked.connect(owner.hide_to_tray)
+        row.addWidget(self.close_btn)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_offset = event.globalPosition().toPoint() - self.owner.frameGeometry().topLeft()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self.owner.move(event.globalPosition().toPoint() - self.drag_offset)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self.drag_offset = None
+        super().mouseReleaseEvent(event)
+
+
+class DeviceCard(QFrame):
+    clicked = Signal(str)
+    dropped = Signal(str, str)
+
+    def __init__(self, name: str, kind: str, rssi: int, palette: dict[str, str], selected=False, overlay=False):
+        super().__init__()
+        self.name, self.kind, self.rssi = name, kind, rssi
+        self.palette = palette
+        self.overlay = overlay
+        self.setObjectName("DeviceCard")
+        self.setProperty("selected", "true" if selected else "false")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAcceptDrops(overlay)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        if overlay:
+            self.setMinimumHeight(83)
+        else:
+            self.setMinimumHeight(156)
+        self._build()
+
+    def _build(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(13, 12, 13, 12)
+        outer.setSpacing(8)
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        avatar = QLabel("▣" if "PC" in self.kind or "DESKTOP" in self.name else self.name[:1].upper())
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        avatar.setFixedSize(41 if self.overlay else 46, 41 if self.overlay else 46)
+        avatar.setStyleSheet(
+            f"background-color: {rgba(self.palette['BLUE'], 90)}; border: 1px solid {rgba(self.palette['CYAN'], 130)};"
+            "border-radius: 13px; font-size: 14pt; font-weight: 700;"
+        )
+        labels = QVBoxLayout()
+        labels.setSpacing(3)
+        name = QLabel(self.name)
+        name.setStyleSheet("font-size: 10.5pt; font-weight: 700;")
+        name.setWordWrap(True)
+        kind = QLabel(self.kind)
+        kind.setObjectName("Muted")
+        kind.setStyleSheet("font-size: 8.5pt;")
+        labels.addWidget(name)
+        labels.addWidget(kind)
+        top.addWidget(avatar)
+        top.addLayout(labels, 1)
+        outer.addLayout(top)
+
+        decision = ProximityPolicy().evaluate(self.rssi, True, True, [self.rssi - 1, self.rssi, self.rssi + 1])
+        footer = QHBoxLayout()
+        if self.overlay:
+            signal_text = "DROP HERE" if decision.allowed else "OUT OF DEMO RANGE"
+        else:
+            signal_text = f"RSSI {self.rssi} dBm  ·  ~{decision.estimated_metres:.1f} m estimate"
+        status = QLabel(signal_text)
+        status.setObjectName("Accent" if decision.allowed else "Muted")
+        status.setStyleSheet("font-size: 8pt; font-weight: 700;" if self.overlay else "font-size: 8pt;")
+        footer.addWidget(status)
+        footer.addStretch(1)
+        badge = QLabel("READY" if decision.allowed else "BLOCKED")
+        badge.setObjectName("Badge")
+        badge.setStyleSheet(
+            f"QLabel#Badge {{ color: {'#6FE3A1' if decision.allowed else '#FFC878'}; font-size: 7.5pt; }}"
+        )
+        footer.addWidget(badge)
+        outer.addLayout(footer)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and not self.overlay:
+            self.clicked.emit(self.name)
+        super().mousePressEvent(event)
+
+    def dragEnterEvent(self, event):
+        if self.overlay and event.mimeData().hasUrls():
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+            self.setStyleSheet(f"QFrame#DeviceCard {{ background-color: {rgba(self.palette['BLUE'], 95)}; border: 1px solid {self.palette['CYAN']}; border-radius: 15px; }}")
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self.setStyleSheet("")
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        urls = [u for u in event.mimeData().urls() if u.isLocalFile()]
+        self.setStyleSheet("")
+        if self.overlay and urls:
+            self.dropped.emit(urls[0].toLocalFile(), self.name)
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+
+class DragPanel(QWidget):
+    fileDropped = Signal(str, str)
+
+    def __init__(self, theme: WallpaperTheme):
+        super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.theme = theme
+        self.palette = theme.palette
+        self.cards: list[DeviceCard] = []
+        self.last_drop_at = 0.0
+        self.setObjectName("DragPanelWindow")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAcceptDrops(True)
+        self.setMinimumWidth(330)
+        self.setMaximumWidth(360)
+        self.setWindowTitle("AirLink — Drop to share")
+        self._build()
+        self.setStyleSheet(make_stylesheet(self.palette))
+
+    def _build(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 8, 8, 8)
+        self.shell = QFrame()
+        self.shell.setObjectName("GlassShell")
+        box = QVBoxLayout(self.shell)
+        box.setContentsMargins(14, 14, 14, 14)
+        box.setSpacing(12)
+        head = QHBoxLayout()
+        mark = QLabel("A")
+        mark.setObjectName("AppMark")
+        mark.setFixedSize(38, 38)
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        brand = QVBoxLayout()
+        lbl = QLabel("AirLink")
+        lbl.setStyleSheet("font-size: 15pt; font-weight: 750;")
+        sub = QLabel("GLASS SHARE PANEL")
+        sub.setObjectName("Muted")
+        sub.setStyleSheet("font-size: 7.2pt; letter-spacing: 1px;")
+        brand.addWidget(lbl)
+        brand.addWidget(sub)
+        head.addWidget(mark)
+        head.addLayout(brand, 1)
+        close = QPushButton("×")
+        close.setObjectName("TitleButton")
+        close.clicked.connect(self.hide)
+        head.addWidget(close)
+        box.addLayout(head)
+
+        drop = QFrame()
+        drop.setObjectName("DropSurface")
+        dl = QVBoxLayout(drop)
+        dl.setContentsMargins(12, 16, 12, 16)
+        dl.setSpacing(5)
+        arrow = QLabel("↗")
+        arrow.setObjectName("Accent")
+        arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        arrow.setStyleSheet("font-size: 28pt; font-weight: 400;")
+        title = QLabel("Drop file to send")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size: 12pt; font-weight: 700;")
+        helper = QLabel("Release on a nearby device")
+        helper.setObjectName("Muted")
+        helper.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        helper.setStyleSheet("font-size: 8.5pt;")
+        dl.addWidget(arrow)
+        dl.addWidget(title)
+        dl.addWidget(helper)
+        box.addWidget(drop)
+
+        row = QHBoxLayout()
+        eyebrow = QLabel("NEARBY DEVICES")
+        eyebrow.setObjectName("Eyebrow")
+        row.addWidget(eyebrow)
+        row.addStretch(1)
+        self.count = QLabel("3 SAMPLES")
+        self.count.setObjectName("Muted")
+        self.count.setStyleSheet("font-size: 7.5pt;")
+        row.addWidget(self.count)
+        box.addLayout(row)
+
+        self.device_list = QVBoxLayout()
+        self.device_list.setSpacing(7)
+        for name, kind, rssi in DEVICES:
+            card = DeviceCard(name, kind, rssi, self.palette, overlay=True)
+            card.dropped.connect(self.fileDropped.emit)
+            self.cards.append(card)
+            self.device_list.addWidget(card)
+        box.addLayout(self.device_list)
+        self.status_label = QLabel("Drag a file from File Explorer, then drop it on a device.")
+        self.status_label.setObjectName("Muted")
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet("font-size: 8.5pt;")
+        box.addWidget(self.status_label)
+        shortcut = QLabel("ESC  ·  HIDE PANEL")
+        shortcut.setObjectName("Muted")
+        shortcut.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        shortcut.setStyleSheet("font-size: 7pt; letter-spacing: .6px;")
+        box.addWidget(shortcut)
+        outer.addWidget(self.shell)
+
+    def show_on_right(self):
+        screen = QApplication.primaryScreen()
+        if screen:
+            rect = screen.availableGeometry()
+            height = min(700, max(500, rect.height() - 48))
+            width = 344
+            self.setGeometry(rect.right() - width - 12, rect.top() + max(10, (rect.height() - height)//2), width, height)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        QTimer.singleShot(180, lambda: apply_windows_acrylic(self, self.palette, 0xC4))
+
+    def set_status(self, text: str, color: Optional[str] = None):
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet(f"font-size: 8.5pt; color: {color or self.palette['MUTED']};")
+
+    def apply_theme(self, palette: dict[str, str]):
+        self.palette = palette
+        self.setStyleSheet(make_stylesheet(palette))
+        # Rebuild cards so avatars/accent badges get the new hue.
+        while self.device_list.count():
+            item = self.device_list.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self.cards = []
+        for name, kind, rssi in DEVICES:
+            card = DeviceCard(name, kind, rssi, palette, overlay=True)
+            card.dropped.connect(self.fileDropped.emit)
+            self.cards.append(card)
+            self.device_list.addWidget(card)
+        if self.isVisible():
+            QTimer.singleShot(100, lambda: apply_windows_acrylic(self, palette, 0xC4))
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            self.set_status("Drop the file directly on a device card.", self.palette['CYAN'])
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        urls = [u for u in event.mimeData().urls() if u.isLocalFile()]
+        if urls:
+            self.set_status("Now drop the file on a device card.", self.palette['ORANGE'])
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class AirLinkWindow(QMainWindow):
+    def __init__(self, theme: WallpaperTheme, tray: QSystemTrayIcon):
+        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.theme = theme
+        self.palette = theme.palette
+        self.tray = tray
+        self.policy = ProximityPolicy(target_metres=5)
+        self.selected_device: Optional[str] = None
+        self.selected_file: Optional[str] = None
+        self.activity: list[str] = []
+        self.current_page = "Nearby"
+        self.drag_offset = None
+        self.setWindowTitle("AirLink — Wallpaper-adaptive glass sharing")
+        self.setWindowIcon(make_icon(64, self.palette['BLUE']))
+        self.setMinimumSize(930, 650)
+        self.resize(1120, 760)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setStyleSheet(make_stylesheet(self.palette))
+        self._build()
+        self.render_page("Nearby")
+        self.center()
+
+    def center(self):
+        screen = QApplication.primaryScreen()
+        if screen:
+            rect = screen.availableGeometry()
+            self.move(rect.center().x() - self.width()//2, rect.center().y() - self.height()//2)
+
+    def _build(self):
+        self.shell = QFrame()
+        self.shell.setObjectName("GlassShell")
+        root_layout = QVBoxLayout(self.shell)
+        root_layout.setContentsMargins(12, 10, 12, 12)
+        root_layout.setSpacing(10)
+        self.titlebar = TitleBar(self, self.palette, "AirLink")
+        root_layout.addWidget(self.titlebar)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(12)
+        self.sidebar = QFrame()
+        self.sidebar.setObjectName("Sidebar")
+        self.sidebar.setFixedWidth(196)
+        side = QVBoxLayout(self.sidebar)
+        side.setContentsMargins(10, 14, 10, 14)
+        side.setSpacing(7)
+        caption = QLabel("WORKSPACE")
+        caption.setObjectName("Muted")
+        caption.setStyleSheet("font-size: 8pt; font-weight: 700; letter-spacing: 1px; padding: 0 8px 6px 8px;")
+        side.addWidget(caption)
+        self.nav_buttons = {}
+        for name, glyph in [("Nearby", "⌁"), ("Activity", "◷"), ("Settings", "⚙")]:
+            btn = QPushButton(f"{glyph}     {name}")
+            btn.setObjectName("NavButton")
+            btn.setCheckable(True)
+            btn.setMinimumHeight(43)
+            btn.clicked.connect(lambda checked=False, n=name: self.render_page(n))
+            side.addWidget(btn)
+            self.nav_buttons[name] = btn
+        side.addStretch(1)
+        adaptive = QFrame()
+        adaptive.setObjectName("GlassCard")
+        ad = QVBoxLayout(adaptive)
+        ad.setContentsMargins(10, 11, 10, 11)
+        ad.setSpacing(6)
+        small = QLabel("✦  ADAPTIVE GLASS")
+        small.setObjectName("Accent")
+        small.setStyleSheet("font-size: 8pt; font-weight: 750;")
+        desc = QLabel("Accent colours follow your desktop wallpaper automatically.")
+        desc.setObjectName("Muted")
+        desc.setWordWrap(True)
+        desc.setStyleSheet("font-size: 8pt;")
+        ad.addWidget(small)
+        ad.addWidget(desc)
+        side.addWidget(ad)
+        host = QVBoxLayout()
+        host.setContentsMargins(0, 0, 0, 0)
+        host.setSpacing(8)
+        self.content = QWidget()
+        self.content.setObjectName("ContentArea")
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(5, 3, 5, 2)
+        self.content_layout.setSpacing(13)
+        host.addWidget(self.content, 1)
+        body.addWidget(self.sidebar)
+        body.addLayout(host, 1)
+        root_layout.addLayout(body, 1)
+        foot = QHBoxLayout()
+        foot.setContentsMargins(5, 1, 5, 0)
+        disclaimer = QLabel("UI PROTOTYPE  ·  SAMPLE DEVICES  ·  NO REAL TRANSFER YET")
+        disclaimer.setObjectName("Muted")
+        disclaimer.setStyleSheet("font-size: 7.5pt; letter-spacing: .8px;")
+        foot.addWidget(disclaimer)
+        foot.addStretch(1)
+        self.theme_state = QLabel("● WALLPAPER-MATCHED")
+        self.theme_state.setObjectName("Accent")
+        self.theme_state.setStyleSheet("font-size: 8pt; font-weight: 700;")
+        foot.addWidget(self.theme_state)
+        root_layout.addLayout(foot)
+        self.setCentralWidget(self.shell)
+
+    def clear_content(self):
+        layout = self.content_layout
+
+        def clear_nested(nested):
+            while nested.count():
+                child = nested.takeAt(0)
+                if child.widget():
+                    child.widget().deleteLater()
+                elif child.layout():
+                    clear_nested(child.layout())
+                    child.layout().deleteLater()
+
+        clear_nested(layout)
+        return layout
+
+    def render_page(self, name: str):
+        self.current_page = name
+        for nav_name, button in self.nav_buttons.items():
+            button.setChecked(nav_name == name)
+        root = self.clear_content()
+        if name == "Nearby":
+            self._build_nearby(root)
+        elif name == "Activity":
+            self._build_activity(root)
+        else:
+            self._build_settings(root)
+        self.content.setStyleSheet("background: transparent;")
+
+    def _page_header(self, layout, title: str, subtitle: str):
+        h = QHBoxLayout()
+        names = QVBoxLayout()
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("PageTitle")
+        sub = QLabel(subtitle)
+        sub.setObjectName("Muted")
+        sub.setWordWrap(True)
+        names.addWidget(title_lbl)
+        names.addWidget(sub)
+        h.addLayout(names, 1)
+        layout.addLayout(h)
+
+    def _build_nearby(self, root):
+        self._page_header(root, "Nearby devices", "A calm, glassy desktop sharing experience that adapts to your wallpaper.")
+        hero = QFrame()
+        hero.setObjectName("HeroCard")
+        hl = QHBoxLayout(hero)
+        hl.setContentsMargins(17, 15, 17, 15)
+        hl.setSpacing(12)
+        symbol = QLabel("↗")
+        symbol.setObjectName("Accent")
+        symbol.setStyleSheet("font-size: 28pt; font-weight: 300;")
+        hl.addWidget(symbol)
+        message = QVBoxLayout()
+        eyebrow = QLabel("DRAG-TO-SHARE")
+        eyebrow.setObjectName("Eyebrow")
+        heading = QLabel("Drop a file on a device")
+        heading.setStyleSheet("font-size: 12pt; font-weight: 700;")
+        detail = QLabel("Drag detection reveals the floating panel; proximity values are illustrative.")
+        detail.setObjectName("Muted")
+        detail.setWordWrap(True)
+        detail.setStyleSheet("font-size: 8.5pt;")
+        message.addWidget(eyebrow)
+        message.addWidget(heading)
+        message.addWidget(detail)
+        hl.addLayout(message, 1)
+        choose = QPushButton("＋  Choose file")
+        choose.setObjectName("PrimaryButton")
+        choose.clicked.connect(self.choose_file)
+        hl.addWidget(choose, 0, Qt.AlignmentFlag.AlignVCenter)
+        root.addWidget(hero)
+
+        row = QHBoxLayout()
+        eyebrow = QLabel("AVAILABLE DEVICES")
+        eyebrow.setObjectName("Eyebrow")
+        row.addWidget(eyebrow)
+        row.addStretch(1)
+        sim = QLabel("DEMO LIST")
+        sim.setObjectName("Badge")
+        row.addWidget(sim)
+        root.addLayout(row)
+        grid_frame = QWidget()
+        grid = QGridLayout(grid_frame)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        for index, (device, kind, rssi) in enumerate(DEVICES):
+            card = DeviceCard(device, kind, rssi, self.palette, selected=(device == self.selected_device), overlay=False)
+            card.clicked.connect(self.select_device)
+            grid.addWidget(card, index // 2, index % 2)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        root.addWidget(grid_frame)
+
+        action = QFrame()
+        action.setObjectName("GlassCard")
+        al = QHBoxLayout(action)
+        al.setContentsMargins(14, 11, 14, 11)
+        al.setSpacing(9)
+        info = QVBoxLayout()
+        label = QLabel("READY TO SHARE")
+        label.setObjectName("Eyebrow")
+        selected = QLabel("Recipient: " + (self.selected_device or "Select a device"))
+        selected.setStyleSheet("font-weight: 650;")
+        selected.setWordWrap(True)
+        file = QLabel("File: " + (Path(self.selected_file).name if self.selected_file else "No file selected"))
+        file.setObjectName("Muted")
+        file.setWordWrap(True)
+        info.addWidget(label)
+        info.addWidget(selected)
+        info.addWidget(file)
+        al.addLayout(info, 1)
+        send = QPushButton("Send file  →")
+        send.setObjectName("PrimaryButton")
+        send.clicked.connect(self.send_file)
+        al.addWidget(send, 0, Qt.AlignmentFlag.AlignVCenter)
+        root.addWidget(action)
+        root.addStretch(1)
+
+    def _build_activity(self, root):
+        self._page_header(root, "Activity", "A local preview of file selections and drop events.")
+        if not self.activity:
+            card = QFrame()
+            card.setObjectName("GlassCard")
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(20, 22, 20, 22)
+            empty = QLabel("◷")
+            empty.setObjectName("Accent")
+            empty.setStyleSheet("font-size: 30pt;")
+            text = QLabel("Nothing here yet")
+            text.setStyleSheet("font-size: 14pt; font-weight: 700;")
+            note = QLabel("Select a file or test a drop-panel interaction to create a local demo activity entry.")
+            note.setObjectName("Muted")
+            note.setWordWrap(True)
+            cl.addWidget(empty, 0, Qt.AlignmentFlag.AlignHCenter)
+            cl.addWidget(text, 0, Qt.AlignmentFlag.AlignHCenter)
+            cl.addWidget(note, 0, Qt.AlignmentFlag.AlignHCenter)
+            root.addWidget(card)
+        else:
+            for item in reversed(self.activity):
+                card = QFrame()
+                card.setObjectName("GlassCard")
+                l = QHBoxLayout(card)
+                l.setContentsMargins(14, 12, 14, 12)
+                glyph = QLabel("↗")
+                glyph.setObjectName("Accent")
+                glyph.setStyleSheet("font-size: 18pt;")
+                desc = QLabel(item)
+                desc.setWordWrap(True)
+                l.addWidget(glyph)
+                l.addWidget(desc, 1)
+                root.addWidget(card)
+        root.addStretch(1)
+
+    def _build_settings(self, root):
+        self._page_header(root, "Settings & policy", "Glass appearance adapts automatically; policy and proximity remain demo-only.")
+        blocks = [
+            ("Appearance", "Wallpaper-matched accent", "AirLink samples Windows wallpaper colors about every 5 seconds."),
+            ("Material", "Windows Acrylic + translucent cards", "If Windows composition support is unavailable, translucent Qt styling remains as a fallback."),
+            ("Proximity", "Illustrative ~5 m policy", "RSSI is noisy and cannot guarantee a physical distance boundary."),
+            ("Discovery", "Sample devices only", "Bluetooth/Wi-Fi device discovery and pairing are not implemented."),
+            ("Transfer", "Not implemented", "This build records a drop event in the interface. It does not transmit file bytes."),
+        ]
+        for title, value, detail in blocks:
+            card = QFrame()
+            card.setObjectName("GlassCard")
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(15, 12, 15, 12)
+            lbl = QLabel(title.upper())
+            lbl.setObjectName("Eyebrow")
+            value_lbl = QLabel(value)
+            value_lbl.setStyleSheet("font-size: 11pt; font-weight: 700;")
+            detail_lbl = QLabel(detail)
+            detail_lbl.setObjectName("Muted")
+            detail_lbl.setWordWrap(True)
+            cl.addWidget(lbl)
+            cl.addWidget(value_lbl)
+            cl.addWidget(detail_lbl)
+            root.addWidget(card)
+        root.addStretch(1)
+
+    def select_device(self, name: str):
+        self.selected_device = name
+        self.render_page(self.current_page)
+
+    def choose_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Choose a file to preview", str(Path.home()), "All files (*.*)")
+        if path:
+            self.selected_file = path
+            self.activity.append(f"Selected {Path(path).name} · no data sent")
+            self.render_page("Nearby")
+
+    def send_file(self):
+        if not self.selected_device:
+            QMessageBox.information(self, "Select a device", "Choose a device card before continuing.")
+            return
+        if not self.selected_file:
+            self.choose_file()
+            if not self.selected_file:
+                return
+        device = next((d for d in DEVICES if d[0] == self.selected_device), None)
+        if not device:
+            return
+        _, _, rssi = device
+        decision = self.policy.evaluate(rssi, True, True, [rssi - 1, rssi, rssi + 1])
+        if not decision.allowed:
+            QMessageBox.warning(self, "Policy blocked", f"This sample signal is below the demo threshold.\n\n{decision.reason}")
+            return
+        QMessageBox.information(
+            self, "UI prototype only",
+            f"File: {Path(self.selected_file).name}\nRecipient: {self.selected_device}\n\n"
+            "The glass UI and selection flow are working, but actual laptop-to-laptop transfer is not implemented yet."
+        )
+        self.activity.append(f"Prepared {Path(self.selected_file).name} → {self.selected_device} · demo only")
+        self.render_page("Activity")
+
+    def handle_file_drop(self, path: str, device_name: str):
+        p = Path(path)
+        if not p.exists() or not p.is_file():
+            if hasattr(self, "panel"):
+                self.panel.set_status("That drop is not a regular file.", self.palette['ORANGE'])
+            return
+        device = next((d for d in DEVICES if d[0] == device_name), None)
+        if not device:
+            return
+        _, _, rssi = device
+        decision = self.policy.evaluate(rssi, True, True, [rssi - 1, rssi, rssi + 1])
+        self.selected_file = str(p)
+        self.selected_device = device_name
+        if decision.allowed:
+            message = f"Detected {p.name} → {device_name}. Demo only; no bytes were sent."
+            color = self.palette['CYAN']
+        else:
+            message = f"{p.name} blocked by the demo signal threshold."
+            color = self.palette['ORANGE']
+        self.activity.append(message)
+        if hasattr(self, "panel"):
+            self.panel.set_status(message, color)
+            self.panel.last_drop_at = time.monotonic()
+        if self.current_page == "Nearby":
+            self.render_page("Nearby")
+
+    def refresh_theme(self, palette: dict[str, str]):
+        self.palette = palette
+        self.setWindowIcon(make_icon(64, palette['BLUE']))
+        self.setStyleSheet(make_stylesheet(palette))
+        if hasattr(self, "panel"):
+            self.panel.apply_theme(palette)
+        self.render_page(self.current_page)
+        if self.isVisible():
+            QTimer.singleShot(100, lambda: apply_windows_acrylic(self, palette, 0xC4))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(180, lambda: apply_windows_acrylic(self, self.palette, 0xC4))
+
+    def closeEvent(self, event):
+        # Keep the background service alive; use the tray menu to quit completely.
+        event.ignore()
+        self.hide()
+        if self.tray.isVisible():
+            self.tray.showMessage("AirLink is still running", "Open AirLink from the system tray or drag a file to show the panel.", QSystemTrayIcon.MessageIcon.Information, 2500)
+
+    def hide_to_tray(self):
+        self.hide()
+
+
+class AirLinkApp:
+    def __init__(self, app: QApplication, background=False):
+        self.app = app
+        self.theme = WallpaperTheme()
+        self.palette = self.theme.palette
+        self.bridge = DragSignals()
+        self.bridge.started.connect(self.drag_started)
+        self.bridge.ended.connect(self.drag_ended)
+        self.bridge.problem.connect(self.detector_problem)
+
+        self.tray = QSystemTrayIcon(make_icon(64, self.palette['BLUE']), app)
+        self.tray.setToolTip("AirLink · Wallpaper-adaptive glass sharing")
+        menu = QMenu()
+        open_action = QAction("Open AirLink", app)
+        open_action.triggered.connect(self.open_dashboard)
+        show_action = QAction("Show drop panel", app)
+        show_action.triggered.connect(self.show_panel)
+        quit_action = QAction("Quit AirLink", app)
+        quit_action.triggered.connect(self.quit)
+        menu.addAction(open_action)
+        menu.addAction(show_action)
+        menu.addSeparator()
+        menu.addAction(quit_action)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self.tray_activated)
+        self.tray.show()
+
+        self.window = AirLinkWindow(self.theme, self.tray)
+        self.panel = DragPanel(self.theme)
+        self.window.panel = self.panel
+        self.panel.fileDropped.connect(self.window.handle_file_drop)
+        self.detector = GlobalDragDetector(self.bridge)
+        self.detector.start()
+        self.background = background
+        if not background:
+            self.window.show()
+        QTimer.singleShot(220, lambda: apply_windows_acrylic(self.window, self.theme.palette, 0xC4) if self.window.isVisible() else None)
+        self.theme_timer = QTimer()
+        self.theme_timer.timeout.connect(self.check_wallpaper)
+        self.theme_timer.start(5000)
+        self.hide_timer: Optional[QTimer] = None
+
+    def open_dashboard(self):
+        self.window.showNormal()
+        self.window.show()
+        self.window.raise_()
+        self.window.activateWindow()
+        QTimer.singleShot(150, lambda: apply_windows_acrylic(self.window, self.theme.palette, 0xC4))
+
+    def show_panel(self):
+        self.panel.show_on_right()
+        self.panel.set_status("Manual preview: drag a file from Explorer onto a device.", self.theme.palette['CYAN'])
+
+    def drag_started(self):
+        self.panel.show_on_right()
+        self.panel.set_status("Release your file on a device card.", self.theme.palette['CYAN'])
+        if self.hide_timer:
+            self.hide_timer.stop()
+
+    def drag_ended(self):
+        if self.hide_timer:
+            self.hide_timer.stop()
+        self.hide_timer = QTimer()
+        self.hide_timer.setSingleShot(True)
+        self.hide_timer.timeout.connect(self.hide_panel_after_drag)
+        self.hide_timer.start(1600)
+
+    def hide_panel_after_drag(self):
+        if time.monotonic() - self.panel.last_drop_at > 1.45:
+            self.panel.hide()
+
+    def detector_problem(self, message: str):
+        self.tray.setToolTip("AirLink · drag detector needs attention")
+        self.panel.set_status(message, self.theme.palette['ORANGE'])
+
+    def check_wallpaper(self):
+        old = self.theme.signature
+        if self.theme.refresh():
+            self.palette = self.theme.palette
+            self.tray.setIcon(make_icon(64, self.palette['BLUE']))
+            self.window.refresh_theme(self.palette)
+            if self.panel.isVisible():
+                self.panel.apply_theme(self.palette)
+                QTimer.singleShot(100, lambda: apply_windows_acrylic(self.panel, self.palette, 0xC4))
+
+    def tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.open_dashboard()
+
+    def quit(self):
+        self.detector.stop()
+        self.panel.hide()
+        self.tray.hide()
+        self.app.quit()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AirLink Windows drag-to-share prototype")
+    parser = argparse.ArgumentParser(description="AirLink wallpaper-adaptive acrylic glass UI prototype")
     parser.add_argument("--background", action="store_true", help="start hidden in the system tray")
     args = parser.parse_args()
-    # Set the palette before constructing widgets, so first launch immediately
-    # matches the current Windows wallpaper instead of flashing a default tint.
-    initial_palette = palette_for_wallpaper(current_wallpaper_path())
-    set_palette_globals(initial_palette)
-    root = TkinterDnD.Tk()
-    try:
-        root.tk.call("tk", "scaling", 1.1)
-    except tk.TclError:
-        pass
-    dashboard = AirLink(root)
-    host = AirLinkHost(root, dashboard, background=args.background)
-    # Keep host referenced for the lifetime of the Tk main loop.
-    root._airlink_host = host
-    root.mainloop()
+    app = QApplication(sys.argv[:1])
+    app.setApplicationName("AirLink")
+    app.setOrganizationName("AirLink")
+    app.setQuitOnLastWindowClosed(False)
+    if not QSystemTrayIcon.isSystemTrayAvailable():
+        print("Warning: Windows system tray is unavailable; background mode may be harder to reopen.")
+    host = AirLinkApp(app, background=args.background)
+    # Keep live references on QApplication.
+    app._airlink_host = host
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

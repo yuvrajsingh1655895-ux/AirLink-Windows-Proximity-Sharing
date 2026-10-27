@@ -1,30 +1,38 @@
-# AirLink — Wallpaper-Adaptive Windows Drag-to-Share Prototype
+# AirLink — Wallpaper-Adaptive Acrylic Glass UI
 
-AirLink is a Windows desktop UI prototype exploring an AirDrop-like drag-to-share workflow. The normal Nearby / Activity / Settings dashboard stays available; when a global mouse drag is detected, a compact receiver panel can appear along the right edge of the desktop.
+AirLink is a Windows desktop UI prototype for an AirDrop-like sharing flow. The normal dashboard remains available when the app is opened. When a drag gesture starts anywhere on the desktop, a floating device dock appears at the right edge; it accepts file drops from File Explorer.
 
-## Wallpaper-adaptive theme
+## What this version changes
 
-- At launch, AirLink samples the current Windows desktop wallpaper and derives a dominant accent hue.
-- The dashboard and sharing panel use a dark tinted palette based on that hue, so blue, green, purple, and other colorful wallpapers produce different accent and surface tints.
-- AirLink checks the wallpaper periodically and updates the palette when the wallpaper changes.
-- This is a **wallpaper-colour-matched theme**, not a true Windows Acrylic/Mica blur effect. The UI uses Tkinter, which does not provide native Windows backdrop blur by itself.
+- **Glass UI:** frameless rounded windows, translucent surfaces, glass-style device cards, soft outlines, and a floating dock.
+- **Native Windows material:** on Windows, AirLink requests the Acrylic composition/backdrop effect through Windows composition APIs. The exact blur strength depends on Windows build, graphics settings, and accessibility settings. If the native effect cannot be applied, the UI falls back to translucent Qt surfaces.
+- **Wallpaper-matched colors:** AirLink samples the current wallpaper and chooses a dominant accent hue. It polls every five seconds, so blue, green, purple, warm, and neutral wallpapers can shift the accent automatically.
+- **Two modes:** opening AirLink shows the full Nearby / Activity / Settings dashboard. Starting in background mode leaves it in the system tray; dragging a file reveals the floating right-side panel.
+- **System tray:** use “Open AirLink”, “Show drop panel”, or “Quit AirLink”. Closing the dashboard hides it to the tray rather than stopping background monitoring.
 
-## Quick start
+## Quick start on Windows
 
-1. Extract the complete ZIP into a normal folder; do not run the project from inside ZIP preview.
-2. Double-click `setup_and_run.bat`. It installs the Python dependencies and opens the dashboard.
-3. Closing the dashboard hides it to the system tray. Choose **Open AirLink** from the tray menu to reopen it.
-4. To start it hidden, double-click `start_background.bat`.
-5. To start AirLink automatically when you sign into Windows, run `install_startup.bat` once. Use `remove_startup.bat` to undo this.
+1. Extract the entire ZIP into a normal folder (do not run from the ZIP preview).
+2. Double-click `setup_and_run.bat`. It installs dependencies and opens the main dashboard.
+3. To run only in the background, use `start_background.bat` after the first setup.
+4. To run automatically after Windows sign-in, use `install_startup.bat` once. Undo with `remove_startup.bat`.
+5. Right-click the AirLink tray icon and choose `Quit AirLink` to fully stop it.
 
-## Test the drag panel
+### Dependencies
 
-1. Start AirLink in the background with `start_background.bat`.
-2. Drag a file from File Explorer. The global mouse-drag detector should show the right-side receiver panel.
-3. Drop the file onto a sample device card. AirLink remembers the selected file/receiver and displays a demo status.
-4. Open the dashboard from the system tray to see the selected file and receiver.
+- PySide6 for the glass-style desktop UI
+- pynput for global mouse-drag gesture detection
+- Pillow for reading the wallpaper and choosing an accent palette
 
-## Run checks
+## Important honest limitations
+
+- **Global drag detection is a heuristic.** Windows does not expose a universal file-only “drag started” event to ordinary desktop applications. The panel can briefly appear for other left-button drag gestures too; it accepts local file drops from Explorer.
+- **Device names and signal levels are sample data.** AirLink does not yet discover laptops over Bluetooth or Wi-Fi, pair with them, or establish a secure connection.
+- **Actual file transmission is not implemented.** A successful drop records a local UI demo event only; it does not send file bytes to another device.
+- **The 5-metre rule is illustrative.** RSSI can vary with walls, interference, antenna design, and hardware; it cannot prove an exact physical distance.
+- Wallpaper adaptation requires Windows to expose a readable wallpaper image path. Otherwise the default blue palette is used.
+
+## Checks
 
 ```powershell
 python -m pip install -r requirements.txt
@@ -33,20 +41,8 @@ python app.py
 python app.py --background
 ```
 
-## Important limitations
+The automated tests cover the conservative demo proximity policy and wallpaper palette generation. The Windows Acrylic effect and global drag/drop behavior still need to be verified on the target Windows laptop.
 
-- Device names and RSSI values are sample data, not computers discovered through Bluetooth or Wi-Fi.
-- The global mouse hook detects general drag gestures; it cannot guarantee that every gesture comes from a file in Explorer, so the panel may briefly appear during some non-file drags.
-- The approximate 5 m rule is a demonstration policy based on illustrative RSSI values. Wi-Fi/Bluetooth signal strength cannot guarantee a physical 5 m boundary.
-- **Actual laptop-to-laptop file transfer is not implemented.** Pairing, real device discovery, secure networking, receiver approval, and byte transfer still need to be developed.
-- Dynamic palette sampling works when Windows exposes a readable wallpaper image path. If it cannot read the wallpaper, AirLink falls back to the default blue palette.
+## Updating an existing GitHub repo
 
-## Project structure
-
-- `app.py` — dashboard, tray, and drag panel
-- `wallpaper_theme.py` — wallpaper sampling, palette generation, and widget recoloring
-- `proximity_policy.py` — demo proximity gate
-- `test_proximity_policy.py` — proximity policy unit tests
-- `test_wallpaper_theme.py` — adaptive palette tests
-
-Windows only. If Windows prompts about Python or security software, review the prompt before allowing it. AirLink does not require administrator privileges for normal use.
+Copy the source files from this folder into the cloned repository folder (preserve the hidden `.git` folder). Commit the changes with a message such as `Redesign AirLink with acrylic glass UI`, then push to origin.

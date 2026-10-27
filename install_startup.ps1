@@ -1,30 +1,16 @@
 $ErrorActionPreference = 'Stop'
-$pythonw = (Get-Command pythonw.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
-if (-not $pythonw) {
-    $pythonCmd = Get-Command python.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($pythonCmd) {
-        $candidate = Join-Path (Split-Path $pythonCmd.Source) 'pythonw.exe'
-        if (Test-Path $candidate) { $pythonw = $candidate }
-    }
-}
-if (-not $pythonw) {
-    $pythonPath = (& python -c "import sys; print(sys.executable)" 2>$null).Trim()
-    if ($pythonPath) {
-        $candidate = Join-Path (Split-Path $pythonPath) 'pythonw.exe'
-        if (Test-Path $candidate) { $pythonw = $candidate }
-    }
-}
-if (-not $pythonw) { throw 'Could not find pythonw.exe. Run setup_and_run.bat first and check your Python installation.' }
+$python = (Get-Command python.exe -ErrorAction Stop).Source
+$pythonw = Join-Path (Split-Path $python) 'pythonw.exe'
+if (-not (Test-Path $pythonw)) { $pythonw = $python }
+$script = Join-Path $PSScriptRoot 'app.py'
 $startup = [Environment]::GetFolderPath('Startup')
-$scriptPath = Join-Path $PSScriptRoot 'app.py'
-$shortcutPath = Join-Path $startup 'AirLink.lnk'
-$shell = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut($shortcutPath)
+$shortcutPath = Join-Path $startup 'AirLink Glass UI.lnk'
+$ws = New-Object -ComObject WScript.Shell
+$shortcut = $ws.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $pythonw
-$shortcut.Arguments = '"' + $scriptPath + '" --background'
+$shortcut.Arguments = '"' + $script + '" --background'
 $shortcut.WorkingDirectory = $PSScriptRoot
-$shortcut.WindowStyle = 7
-$shortcut.Description = 'Start AirLink background drag-to-share prototype'
+$shortcut.Description = 'Start AirLink wallpaper-adaptive glass sharing UI in the system tray'
+$shortcut.IconLocation = $pythonw
 $shortcut.Save()
-Write-Host "Startup shortcut installed: $shortcutPath"
-Write-Host 'AirLink will run at sign-in. Remove it with remove_startup.bat.'
+Write-Host "AirLink startup shortcut installed: $shortcutPath"
