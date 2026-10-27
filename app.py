@@ -10,6 +10,7 @@ import ctypes
 import math
 import os
 import sys
+import socket
 import threading
 import time
 from pathlib import Path
@@ -20,7 +21,7 @@ from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QBrush, QActio
 from PySide6.QtWidgets import (
     QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow,
     QMenu, QMessageBox, QFileDialog, QPushButton, QSizePolicy, QSystemTrayIcon,
-    QVBoxLayout, QWidget, QSpacerItem,
+    QVBoxLayout, QWidget, QSpacerItem, QInputDialog, QProgressDialog,
 )
 
 try:
@@ -30,12 +31,11 @@ except ImportError:
 
 from proximity_policy import ProximityPolicy
 from wallpaper_theme import current_wallpaper_path, palette_for_wallpaper
+from transfer_service import TransferReceiver, PORT as TRANSFER_PORT, local_ip, send_file as send_file_over_lan
 
 
 DEVICES = [
-    ("DESKTOP-STUDIO", "Windows laptop", -48),
-    ("Study Laptop", "Windows laptop", -62),
-    ("Room PC", "Windows PC", -75),
+    ("LAN receiver", "Connect using the receiving laptop IPv4 address", None),
 ]
 
 
@@ -422,22 +422,28 @@ class DeviceCard(QFrame):
         top.addLayout(labels, 1)
         outer.addLayout(top)
 
-        decision = ProximityPolicy().evaluate(self.rssi, True, True, [self.rssi - 1, self.rssi, self.rssi + 1])
+        decision = None
+        if self.rssi is not None:
+            decision = ProximityPolicy().evaluate(self.rssi, True, True, [self.rssi - 1, self.rssi, self.rssi + 1])
         footer = QHBoxLayout()
-        if self.overlay:
-            signal_text = "DROP HERE" if decision.allowed else "OUT OF DEMO RANGE"
+        if self.rssi is None:
+            signal_text = "DROP FILE HERE" if self.overlay else "Enter receiver IP when sending"
+            badge_text, badge_color = "MANUAL IP", self.palette["CYAN"]
         else:
-            signal_text = f"RSSI {self.rssi} dBm  ·  ~{decision.estimated_metres:.1f} m estimate"
+            if self.overlay:
+                signal_text = "DROP HERE" if decision.allowed else "OUT OF DEMO RANGE"
+            else:
+                signal_text = f"RSSI {self.rssi} dBm  ·  ~{decision.estimated_metres:.1f} m estimate"
+            badge_text = "READY" if decision.allowed else "BLOCKED"
+            badge_color = "#6FE3A1" if decision.allowed else "#FFC878"
         status = QLabel(signal_text)
-        status.setObjectName("Accent" if decision.allowed else "Muted")
+        status.setObjectName("Accent" if (decision is None or decision.allowed) else "Muted")
         status.setStyleSheet("font-size: 8pt; font-weight: 700;" if self.overlay else "font-size: 8pt;")
         footer.addWidget(status)
         footer.addStretch(1)
-        badge = QLabel("READY" if decision.allowed else "BLOCKED")
+        badge = QLabel(badge_text)
         badge.setObjectName("Badge")
-        badge.setStyleSheet(
-            f"QLabel#Badge {{ color: {'#6FE3A1' if decision.allowed else '#FFC878'}; font-size: 7.5pt; }}"
-        )
+        badge.setStyleSheet(f"QLabel#Badge {{ color: {badge_color}; font-size: 7.5pt; }}")
         footer.addWidget(badge)
         outer.addLayout(footer)
 
@@ -542,7 +548,7 @@ class DragPanel(QWidget):
         eyebrow.setObjectName("Eyebrow")
         row.addWidget(eyebrow)
         row.addStretch(1)
-        self.count = QLabel("3 SAMPLES")
+        self.count = QLabel("MANUAL LAN")
         self.count.setObjectName("Muted")
         self.count.setStyleSheet("font-size: 7.5pt;")
         row.addWidget(self.count)
@@ -623,6 +629,11 @@ class DragPanel(QWidget):
             event.accept()
             return
         super().keyPressEvent(event)
+
+
+class TransferSignals(QObject):
+    progress = Signal(str, str, int)
+    finished = Signal(str, bool, str)
 
 
 class AirLinkWindow(QMainWindow):
@@ -714,7 +725,7 @@ class AirLinkWindow(QMainWindow):
         root_layout.addLayout(body, 1)
         foot = QHBoxLayout()
         foot.setContentsMargins(5, 1, 5, 0)
-        disclaimer = QLabel("UI PROTOTYPE  ·  SAMPLE DEVICES  ·  NO REAL TRANSFER YET")
+        disclaimer = QLabel("LAN TRANSFER  ·  RECEIVER APPROVAL REQUIRED")
         disclaimer.setObjectName("Muted")
         disclaimer.setStyleSheet("font-size: 7.5pt; letter-spacing: .8px;")
         foot.addWidget(disclaimer)
@@ -768,7 +779,7 @@ class AirLinkWindow(QMainWindow):
         layout.addLayout(h)
 
     def _build_nearby(self, root):
-        self._page_header(root, "Nearby devices", "A calm, glassy desktop sharing experience that adapts to your wallpaper.")
+        self._page_header(root, "Nearby devices", "Wallpaper-adaptive glass UI with receiver-approved transfers over a trusted local network.")
         hero = QFrame()
         hero.setObjectName("HeroCard")
         hl = QHBoxLayout(hero)
@@ -783,7 +794,7 @@ class AirLinkWindow(QMainWindow):
         eyebrow.setObjectName("Eyebrow")
         heading = QLabel("Drop a file on a device")
         heading.setStyleSheet("font-size: 12pt; font-weight: 700;")
-        detail = QLabel("Drag detection reveals the floating panel; proximity values are illustrative.")
+        detail = QLabel("Select a file, enter the receiving laptop IP, and approve on the other device.")
         detail.setObjectName("Muted")
         detail.setWordWrap(True)
         detail.setStyleSheet("font-size: 8.5pt;")
@@ -796,13 +807,17 @@ class AirLinkWindow(QMainWindow):
         choose.clicked.connect(self.choose_file)
         hl.addWidget(choose, 0, Qt.AlignmentFlag.AlignVCenter)
         root.addWidget(hero)
+        receive_address = QLabel(f"THIS PC RECEIVES AT  {local_ip()}:{TRANSFER_PORT}   ·   APPROVAL REQUIRED")
+        receive_address.setObjectName("Badge")
+        receive_address.setWordWrap(True)
+        root.addWidget(receive_address)
 
         row = QHBoxLayout()
-        eyebrow = QLabel("AVAILABLE DEVICES")
+        eyebrow = QLabel("RECEIVER CONNECTION")
         eyebrow.setObjectName("Eyebrow")
         row.addWidget(eyebrow)
         row.addStretch(1)
-        sim = QLabel("DEMO LIST")
+        sim = QLabel("MANUAL LAN CONNECTION")
         sim.setObjectName("Badge")
         row.addWidget(sim)
         root.addLayout(row)
@@ -827,7 +842,7 @@ class AirLinkWindow(QMainWindow):
         info = QVBoxLayout()
         label = QLabel("READY TO SHARE")
         label.setObjectName("Eyebrow")
-        selected = QLabel("Recipient: " + (self.selected_device or "Select a device"))
+        selected = QLabel("Recipient: " + (self.selected_device or "Enter a receiver IP"))
         selected.setStyleSheet("font-weight: 650;")
         selected.setWordWrap(True)
         file = QLabel("File: " + (Path(self.selected_file).name if self.selected_file else "No file selected"))
@@ -845,7 +860,7 @@ class AirLinkWindow(QMainWindow):
         root.addStretch(1)
 
     def _build_activity(self, root):
-        self._page_header(root, "Activity", "A local preview of file selections and drop events.")
+        self._page_header(root, "Activity", "Real transfer events and incoming file approvals on this PC.")
         if not self.activity:
             card = QFrame()
             card.setObjectName("GlassCard")
@@ -884,9 +899,9 @@ class AirLinkWindow(QMainWindow):
         blocks = [
             ("Appearance", "Wallpaper-matched accent", "AirLink samples Windows wallpaper colors about every 5 seconds."),
             ("Material", "Windows Acrylic + translucent cards", "If Windows composition support is unavailable, translucent Qt styling remains as a fallback."),
-            ("Proximity", "Illustrative ~5 m policy", "RSSI is noisy and cannot guarantee a physical distance boundary."),
-            ("Discovery", "Sample devices only", "Bluetooth/Wi-Fi device discovery and pairing are not implemented."),
-            ("Transfer", "Not implemented", "This build records a drop event in the interface. It does not transmit file bytes."),
+            ("Proximity", "Not used to authorize real LAN transfers yet", "Wi-Fi RSSI is not a reliable exact 5-metre measurement; LAN transfers require receiver approval instead."),
+            ("Discovery", "Manual LAN address", "Enter the receiving laptop IPv4 address. Automatic Bluetooth/Wi-Fi discovery is not implemented."),
+            ("Transfer", "Real file bytes over private LAN", "The receiver must approve each incoming file. First version uses unencrypted HTTP; use only on a trusted private network."),
         ]
         for title, value, detail in blocks:
             card = QFrame()
@@ -918,28 +933,10 @@ class AirLinkWindow(QMainWindow):
             self.render_page("Nearby")
 
     def send_file(self):
-        if not self.selected_device:
-            QMessageBox.information(self, "Select a device", "Choose a device card before continuing.")
-            return
-        if not self.selected_file:
-            self.choose_file()
-            if not self.selected_file:
-                return
-        device = next((d for d in DEVICES if d[0] == self.selected_device), None)
-        if not device:
-            return
-        _, _, rssi = device
-        decision = self.policy.evaluate(rssi, True, True, [rssi - 1, rssi, rssi + 1])
-        if not decision.allowed:
-            QMessageBox.warning(self, "Policy blocked", f"This sample signal is below the demo threshold.\n\n{decision.reason}")
-            return
-        QMessageBox.information(
-            self, "UI prototype only",
-            f"File: {Path(self.selected_file).name}\nRecipient: {self.selected_device}\n\n"
-            "The glass UI and selection flow are working, but actual laptop-to-laptop transfer is not implemented yet."
-        )
-        self.activity.append(f"Prepared {Path(self.selected_file).name} → {self.selected_device} · demo only")
-        self.render_page("Activity")
+        if hasattr(self, "host_app"):
+            self.host_app.send_file_action()
+        else:
+            QMessageBox.warning(self, "AirLink", "Transfer service is not initialized.")
 
     def handle_file_drop(self, path: str, device_name: str):
         p = Path(path)
@@ -947,25 +944,15 @@ class AirLinkWindow(QMainWindow):
             if hasattr(self, "panel"):
                 self.panel.set_status("That drop is not a regular file.", self.palette['ORANGE'])
             return
-        device = next((d for d in DEVICES if d[0] == device_name), None)
-        if not device:
-            return
-        _, _, rssi = device
-        decision = self.policy.evaluate(rssi, True, True, [rssi - 1, rssi, rssi + 1])
         self.selected_file = str(p)
         self.selected_device = device_name
-        if decision.allowed:
-            message = f"Detected {p.name} → {device_name}. Demo only; no bytes were sent."
-            color = self.palette['CYAN']
-        else:
-            message = f"{p.name} blocked by the demo signal threshold."
-            color = self.palette['ORANGE']
-        self.activity.append(message)
+        self.activity.append(f"Selected {p.name} for LAN transfer")
         if hasattr(self, "panel"):
-            self.panel.set_status(message, color)
+            self.panel.set_status(f"Selected {p.name}. Enter the receiver's LAN IP in the dashboard to send.", self.palette['CYAN'])
             self.panel.last_drop_at = time.monotonic()
-        if self.current_page == "Nearby":
-            self.render_page("Nearby")
+        self.render_page("Nearby")
+        if hasattr(self, "host_app"):
+            QTimer.singleShot(120, self.host_app.send_file_action)
 
     def refresh_theme(self, palette: dict[str, str]):
         self.palette = palette
@@ -997,6 +984,13 @@ class AirLinkApp:
         self.app = app
         self.theme = WallpaperTheme()
         self.palette = self.theme.palette
+        self.receiver = TransferReceiver()
+        self.receiver.start()
+        self.transfer_signals = TransferSignals()
+        self.transfer_signals.progress.connect(self.on_transfer_progress)
+        self.transfer_signals.finished.connect(self.on_transfer_finished)
+        self.progress_dialog = None
+        self.active_job = None
         self.bridge = DragSignals()
         self.bridge.started.connect(self.drag_started)
         self.bridge.ended.connect(self.drag_ended)
@@ -1020,9 +1014,13 @@ class AirLinkApp:
         self.tray.show()
 
         self.window = AirLinkWindow(self.theme, self.tray)
+        self.window.host_app = self
         self.panel = DragPanel(self.theme)
         self.window.panel = self.panel
         self.panel.fileDropped.connect(self.window.handle_file_drop)
+        self.incoming_timer = QTimer()
+        self.incoming_timer.timeout.connect(self.check_incoming_offers)
+        self.incoming_timer.start(500)
         self.detector = GlobalDragDetector(self.bridge)
         self.detector.start()
         self.background = background
@@ -1033,6 +1031,94 @@ class AirLinkApp:
         self.theme_timer.timeout.connect(self.check_wallpaper)
         self.theme_timer.start(5000)
         self.hide_timer: Optional[QTimer] = None
+
+    def send_file_action(self):
+        path = self.window.selected_file
+        if not path or not Path(path).is_file():
+            path, _ = QFileDialog.getOpenFileName(self.window, "Choose a file to send", str(Path.home()), "All files (*.*)")
+            if not path:
+                return
+            self.window.selected_file = path
+        dialog_parent = self.panel if self.panel.isVisible() else self.window
+        host, ok = QInputDialog.getText(
+            dialog_parent, "Send to another laptop",
+            f"Enter the receiving laptop's IPv4 address (same private Wi-Fi/LAN).\nThis PC receives at {local_ip()}:{TRANSFER_PORT}",
+            text="192.168.1.25"
+        )
+        if not ok or not host.strip():
+            return
+        host = host.strip()
+        port = TRANSFER_PORT
+        if ":" in host and host.count(":") == 1:
+            host, port_text = host.rsplit(":", 1)
+            try:
+                port = int(port_text)
+            except ValueError:
+                QMessageBox.warning(self.window, "Invalid address", "Port must be a number.")
+                return
+        if not host or any(ch in host for ch in "/\\ ?#") or not 1 <= port <= 65535:
+            QMessageBox.warning(self.window, "Invalid address", "Enter an IPv4 address such as 192.168.1.25, optionally followed by :port.")
+            return
+        file_path = path
+        job_id = str(time.time_ns())
+        self.active_job = job_id
+        self.progress_dialog = QProgressDialog("Connecting to receiver…", "", 0, 100, dialog_parent)
+        self.progress_dialog.setWindowTitle("AirLink transfer")
+        self.progress_dialog.setCancelButton(None)
+        self.progress_dialog.setMinimumDuration(0)
+        self.progress_dialog.setValue(0)
+        self.progress_dialog.show()
+        self.window.activity.append(f"Offering {Path(file_path).name} to {host}:{port}…")
+        self.window.render_page("Activity")
+        def worker():
+            try:
+                send_file_over_lan(host, file_path, socket.gethostname(), self.transfer_signals, job_id, port=port)
+            except Exception as exc:
+                self.transfer_signals.finished.emit(job_id, False, f"Could not send {Path(file_path).name}: {exc}")
+        threading.Thread(target=worker, name="AirLinkSender", daemon=True).start()
+
+    def on_transfer_progress(self, job_id: str, message: str, percent: int):
+        if job_id != self.active_job or self.progress_dialog is None:
+            return
+        self.progress_dialog.setLabelText(message)
+        self.progress_dialog.setValue(max(0, min(100, percent)))
+
+    def on_transfer_finished(self, job_id: str, success: bool, message: str):
+        if job_id != self.active_job:
+            return
+        if self.progress_dialog is not None:
+            self.progress_dialog.close()
+            self.progress_dialog = None
+        self.window.activity.append(("✓ " if success else "✕ ") + message)
+        self.window.render_page("Activity")
+        dialog_parent = self.panel if self.panel.isVisible() else self.window
+        if success:
+            QMessageBox.information(dialog_parent, "AirLink transfer complete", message)
+        else:
+            QMessageBox.warning(dialog_parent, "AirLink transfer failed", message + "\n\nConfirm both laptops are on the same trusted private network, the receiving AirLink is running, and Windows Firewall allows Python on Private networks.")
+
+    def check_incoming_offers(self):
+        # The receiver prompts on the GUI thread; incoming HTTP threads only queue offers.
+        offer = self.receiver.next_pending()
+        if not offer:
+            return
+        size_text = f"{offer['size']:,} bytes"
+        if offer["size"] >= 1024 * 1024:
+            size_text += f" ({offer['size'] / (1024*1024):.1f} MiB)"
+        answer = QMessageBox.question(
+            self.window, "Incoming AirLink file",
+            f"{offer['sender']} wants to send this file to your PC:\n\n"
+            f"File: {offer['filename']}\nSize: {size_text}\n\n"
+            f"Accept and save it to:\n{self.receiver.inbox}\n\nAccept this file?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        self.receiver.decide(offer["id"], answer == QMessageBox.StandardButton.Yes)
+        if answer == QMessageBox.StandardButton.Yes:
+            self.window.activity.append(f"Accepted incoming file {offer['filename']} from {offer['sender']}")
+        else:
+            self.window.activity.append(f"Declined incoming file {offer['filename']} from {offer['sender']}")
+        self.window.render_page("Activity")
 
     def open_dashboard(self):
         self.window.showNormal()
@@ -1083,13 +1169,14 @@ class AirLinkApp:
 
     def quit(self):
         self.detector.stop()
+        self.receiver.stop()
         self.panel.hide()
         self.tray.hide()
         self.app.quit()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AirLink wallpaper-adaptive acrylic glass UI prototype")
+    parser = argparse.ArgumentParser(description="AirLink wallpaper-adaptive glass UI and LAN file transfer")
     parser.add_argument("--background", action="store_true", help="start hidden in the system tray")
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])

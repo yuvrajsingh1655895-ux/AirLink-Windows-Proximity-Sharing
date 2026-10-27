@@ -18,6 +18,17 @@ AirLink is a Windows desktop UI prototype for an AirDrop-like sharing flow. The 
 4. To run automatically after Windows sign-in, use `install_startup.bat` once. Undo with `remove_startup.bat`.
 5. Right-click the AirLink tray icon and choose `Quit AirLink` to fully stop it.
 
+
+## Sending a real file between two Windows laptops
+
+1. Extract this project and run `setup_and_run.bat` on **both** laptops. Keep AirLink running on the receiving laptop.
+2. On the receiving laptop, open AirLink and note the `THIS PC RECEIVES AT` address shown on the Nearby page (for example `192.168.1.25:47831`). The sender only needs the IP portion; the default port is `47831`.
+3. On the sending laptop, choose a file and click `Send file`; enter the receiving laptop's IP address. Both devices must be connected to the same trusted private Wi-Fi/LAN.
+4. On the receiving laptop, approve the incoming-file dialog. The file is written to the `AirLink Received` folder inside the receiver's Windows user profile.
+5. If Windows Firewall asks, allow Python/AirLink on **Private networks only**. Check that the Wi-Fi network is marked Private in Windows network settings if the two PCs cannot connect.
+
+For the first transfer, use a small non-sensitive test file. This version uses unencrypted HTTP on the LAN; the receiver approval is not a substitute for encryption or cryptographic device identity. Do not use it on public or untrusted Wi-Fi.
+
 ### Dependencies
 
 - PySide6 for the glass-style desktop UI
@@ -41,7 +52,7 @@ python app.py
 python app.py --background
 ```
 
-The automated tests cover the conservative demo proximity policy and wallpaper palette generation. The Windows Acrylic effect and global drag/drop behavior still need to be verified on the target Windows laptop.
+The automated tests cover the demo proximity policy, wallpaper palette generation, and transfer-service filename/size safety helpers. The Windows Acrylic effect, global drag/drop behavior, and two-device network transfer need to be verified on Windows.
 
 ## Updating an existing GitHub repo
 
